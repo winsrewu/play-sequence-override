@@ -1,13 +1,19 @@
 # Play Sequence Override
 
-A stateless Docker service that embeds Bilibili audio with EfficientAT, plus a
-Microsoft Edge / Chromium MV3 extension that orders playback with the ported C
-recommender.
+Mainstream music platforms rely on play control sequence algorithms that either
+require a subscription fee or are too repetitive and lack variety. So here's an
+intelligent playback engine which overrides the boring shuffles and repeat mode
+of your playlist, powered by machine learning. It is free, while keeping you in
+full control.
 
-The backend exposes only `POST /v1/embed`. It verifies a delegated jawbts-api
-JWT, downloads the requested Bilibili audio, computes a 960-D vector, and
-deletes the temporary audio. It keeps no catalog, vectors, history, or playback
-state. The extension keeps all of that in IndexedDB.
+It runs on Bilibili today; the engine is platform-agnostic, so other platforms
+can follow.
+
+The backend is a stateless Docker service that embeds audio with EfficientAT and
+exposes only `POST /v1/embed`. It verifies a delegated jawbts-api JWT, downloads
+the requested Bilibili audio, computes a 960-D vector, and deletes the temporary
+audio; it keeps no catalog, vectors, history, or playback state. The Microsoft
+Edge / Chromium MV3 extension keeps all of that in IndexedDB and drives playback.
 
 ## Deploy
 

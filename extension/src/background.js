@@ -7,18 +7,24 @@ import {
   extensionId,
   redirectUri,
 } from './lib/auth.js'
-import { DEFAULT_CATALOG_URL, normalizeConfig } from './lib/config.js'
+import { normalizeConfig } from './lib/config.js'
+import {
+  DERIVED_VERSION,
+  computeProjectionModel,
+  computeStyleModel,
+  projectPoint,
+  shouldReuseDerived,
+} from './lib/derived.js'
 import { embedTrack } from './lib/embed-api.js'
 import {
   cacheEmbedding,
   cacheEmbeddings,
   invalidateCachedEmbeddings,
   loadAllVectors,
-  loadBundledEmbeddings,
   missingTrackIds,
 } from './lib/embeddings.js'
 import { parseEmbeddingText } from './lib/embedding-json.js'
-import { exportV2, parsePlaylist, playlistSummary } from './lib/playlist.js'
+import { FORMAT, VERSION, exportV2, parseAnyPlaylist, playlistSummary } from './lib/playlist.js'
 import { forgetTab, isVideoTabUrl, ownerTab, ownerTabId, registerTab } from './lib/sequence.js'
 import * as store from './lib/storage.js'
 import { getConfig, setConfig } from './lib/storage.js'
@@ -31,7 +37,6 @@ let initialization = null
 let projectionCache = null
 let lastDecision = null
 let styleCache = null
-let seedPromise = null
 let lastAutoAdvance = null
 let autoPrefetchPromise = null
 let prefetchState = {
@@ -170,12 +175,9 @@ async function ensureCatalog() {
     catalogCache = stored
     return stored
   }
-  const response = await fetch(chrome.runtime.getURL(DEFAULT_CATALOG_URL), { cache: 'no-store' })
-  if (!response.ok) throw new Error('the bundled music catalog is unavailable')
-  const playlist = parsePlaylist(await response.json())
-  await store.setCatalog(playlist)
-  catalogCache = playlist
-  return playlist
+  // Nothing is bundled: the catalog comes from an imported playlist only.
+  catalogCache = { format: FORMAT, version: VERSION, tracks: [], empty: true }
+  return catalogCache
 }
 
 async function initialize() {
@@ -191,19 +193,45 @@ async function initialize() {
   return initialization
 }
 
+// Style clusters and the 2-D map are derived from the vectors and cached; the
+// extension never reads a bundled data folder.
+let derivedCache = null
+
+async function getDerived() {
+  if (derivedCache) return derivedCache
+  const { vectors, dim } = await loadAllVectors()
+  const stored = await store.getDerived()
+  if (shouldReuseDerived(stored, vectors.size, dim)) {
+    derivedCache = stored
+    return stored
+  }
+  const record = {
+    version: DERIVED_VERSION,
+    dim,
+    count: vectors.size,
+    style: computeStyleModel(vectors),
+    projection: computeProjectionModel(vectors),
+    updatedAt: Date.now(),
+  }
+  derivedCache = record
+  await store.setDerived(record).catch(() => {})
+  return record
+}
+
+function styleFromDerived(style) {
+  if (!style) return { labels: null, centroids: [] }
+  return {
+    labels: new Map(style.ids.map((id, index) => [id, style.labels[index]])),
+    centroids: style.centroids,
+  }
+}
+
 async function loadStyleData() {
-  if (styleCache) return styleCache
-  const response = await fetch(chrome.runtime.getURL('data/style-labels.json'), { cache: 'no-store' })
-  if (!response.ok) throw new Error('style-labels.json is unavailable')
-  const model = await response.json()
-  if (!Array.isArray(model.ids) || !Array.isArray(model.labels) || !Array.isArray(model.centroids)) {
-    throw new Error('style-labels.json is malformed')
-  }
-  styleCache = {
-    labels: new Map(model.ids.map((id, index) => [id, model.labels[index]])),
-    centroids: model.centroids,
-  }
-  return styleCache
+  const source = await getDerived()
+  if (styleCache?.source === source) return styleCache.value
+  const value = styleFromDerived(source.style)
+  styleCache = { source, value }
+  return value
 }
 
 async function getRecommender(force = false) {
@@ -233,165 +261,29 @@ function tuningFromConfig(config) {
 function invalidateRecommender() {
   recommenderCache = null
   projectionCache = null
+  styleCache = null
+  derivedCache = null
 }
 
-async function autoSeedEmbeddings() {
-  if (seedPromise) return seedPromise
-  seedPromise = (async () => {
-    await initialize()
-    const [catalog, bundle, cached, previousSeed] = await Promise.all([
-      ensureCatalog(),
-      loadBundledEmbeddings(),
-      store.getVectorCache(),
-      store.getEmbeddingSeed(),
-    ])
-    const catalogIds = new Set(catalog.tracks.map((track) => track.id))
-    const accepted = new Map()
-    let ignored = 0
-    for (const [id, vector] of bundle.vectors) {
-      if (catalogIds.has(id)) accepted.set(id, vector)
-      else ignored += 1
-    }
-    const missing = new Map()
-    for (const [id, vector] of accepted) {
-      if (!cached.has(id)) missing.set(id, vector)
-    }
-    const total = missing.size
-    const seed = {
-      sha256: bundle.sha256,
-      count: accepted.size,
-      ignored,
-      importedAt: Date.now(),
-    }
-    if (previousSeed?.sha256 === bundle.sha256 && total === 0) {
-      return { done: 0, total: 0, ignored, skipped: true }
-    }
-    if (total === 0) {
-      await store.setEmbeddingSeed(seed)
-      broadcast({
-        type: 'embedding-import-progress',
-        phase: 'auto',
-        done: 0,
-        total: 0,
-        ignored,
-        complete: true,
-      })
-      return { done: 0, total: 0, ignored }
-    }
-
-    const entries = [...missing.entries()]
-    const chunkSize = 100
-    let done = 0
-    for (let start = 0; start < entries.length; start += chunkSize) {
-      const chunk = new Map(entries.slice(start, start + chunkSize))
-      await store.setVectorCacheEntries(chunk)
-      done += chunk.size
-      broadcast({
-        type: 'embedding-import-progress',
-        phase: 'auto',
-        done,
-        total,
-        ignored,
-        complete: done >= total,
-      })
-    }
-    await store.setEmbeddingSeed(seed)
-    invalidateCachedEmbeddings()
-    invalidateRecommender()
-    broadcast({
-      type: 'embedding-import-progress',
-      phase: 'auto',
-      done: total,
-      total,
-      ignored,
-      complete: true,
-    })
-    broadcast({ type: 'data-changed', kind: 'embeddings' })
-    return { done: total, total, ignored }
-  })().catch((error) => {
-    seedPromise = null
-    console.error('automatic embedding import failed', error)
-    broadcast({
-      type: 'embedding-import-progress',
-      phase: 'auto',
-      done: 0,
-      total: 0,
-      ignored: 0,
-      complete: true,
-      error: error?.message || String(error),
-    })
-    throw error
-  })
-  return seedPromise
-}
-
-function normalizeVector(vector) {
-  const copy = vector instanceof Float32Array ? new Float32Array(vector) : Float32Array.from(vector)
-  let norm = 0
-  for (let i = 0; i < copy.length; i += 1) norm += copy[i] * copy[i]
-  norm = Math.sqrt(norm)
-  if (norm > 1e-12) {
-    for (let i = 0; i < copy.length; i += 1) copy[i] /= norm
+function derivedProjection(projection) {
+  if (!projection) return { byId: new Map(), project: () => ({ x: 0, y: 0 }) }
+  const byId = new Map()
+  for (let index = 0; index < projection.ids.length; index += 1) {
+    byId.set(projection.ids[index], { x: projection.x[index], y: projection.y[index] })
   }
-  return copy
-}
-
-function dot(a, b) {
-  let sum = 0
-  for (let i = 0; i < a.length; i += 1) sum += a[i] * b[i]
-  return sum
+  return { byId, project: (vector) => projectPoint(projection, vector) }
 }
 
 async function loadProjection() {
-  if (projectionCache) return projectionCache
-  const [response, bundle] = await Promise.all([
-    fetch(chrome.runtime.getURL('data/projection.json'), { cache: 'no-store' }),
-    loadBundledEmbeddings(),
-  ])
-  if (!response.ok) throw new Error('projection.json is unavailable')
-  const model = await response.json()
-  if (
-    !Array.isArray(model.ids) ||
-    !Array.isArray(model.x) ||
-    !Array.isArray(model.y) ||
-    !Array.isArray(model.k_fit_rows) ||
-    !Array.isArray(model.scaled_alphas)
-  ) {
-    throw new Error('projection.json is malformed')
-  }
-  const byId = new Map()
-  for (let i = 0; i < model.ids.length; i += 1) {
-    byId.set(model.ids[i], { x: model.x[i], y: model.y[i] })
-  }
-  const training = model.ids.map((id) => {
-    const vector = bundle.vectors.get(id)
-    if (!vector) throw new Error(`projection training vector is missing: ${id}`)
-    return normalizeVector(vector)
-  })
-  projectionCache = { model, byId, training }
-  return projectionCache
-}
-
-function projectVector(model, training, vector) {
-  const k = new Float64Array(model.ids.length)
-  let total = 0
-  for (let i = 0; i < training.length; i += 1) {
-    k[i] = dot(vector, training[i])
-    total += k[i]
-  }
-  const mean = total / training.length
-  let x = 0
-  let y = 0
-  for (let i = 0; i < training.length; i += 1) {
-    const centered = k[i] - model.k_fit_rows[i] - mean + model.k_fit_all
-    x += centered * model.scaled_alphas[i][0]
-    y += centered * model.scaled_alphas[i][1]
-  }
-  return { x, y }
+  const source = await getDerived()
+  if (projectionCache?.source === source) return projectionCache.value
+  const value = derivedProjection(source.projection)
+  projectionCache = { source, value }
+  return value
 }
 
 async function projectionPoints(recommender) {
-  const { model, byId, training } = await loadProjection()
+  const { byId, project } = await loadProjection()
   const points = []
   for (const id of recommender.ids) {
     const known = byId.get(id)
@@ -400,8 +292,7 @@ async function projectionPoints(recommender) {
       continue
     }
     const index = recommender.indexById.get(id)
-    const vector = recommender.vectors[index]
-    const projected = projectVector(model, training, vector)
+    const projected = project(recommender.vectors[index])
     points.push({ id, x: projected.x, y: projected.y, approximate: true })
   }
   return points
@@ -409,9 +300,7 @@ async function projectionPoints(recommender) {
 
 async function status() {
   await initialize()
-  const seed = autoSeedEmbeddings().catch(() => {})
   autoPrefetchMissing().catch(() => {})
-  await seed
   const [config, catalog, session, currentId, history, plays] = await Promise.all([
     getConfig(),
     ensureCatalog(),
@@ -457,6 +346,7 @@ async function status() {
     ok: true,
     protocol: EXTENSION_PROTOCOL,
     catalogCount: catalog.tracks.length,
+    catalogMissing: Boolean(catalog.empty),
     embeddedCount,
     missingCount,
     vectorError,
@@ -472,7 +362,6 @@ async function status() {
     gatewayAllowlistHost: new URL(redirectUri()).hostname,
     summary: playlistSummary(catalog),
     sessionPlays: plays,
-    embeddingSeed: await store.getEmbeddingSeed(),
     prefetch: prefetchState,
     owner: owner
       ? { tabId: owner.tabId, id: owner.id, title: owner.title, url: owner.url }
@@ -770,11 +659,30 @@ async function autoPrefetchMissing() {
   if (autoPrefetchPromise) return autoPrefetchPromise
   autoPrefetchPromise = (async () => {
     await initialize()
-    await autoSeedEmbeddings().catch(() => {})
     const [catalog, { vectors }] = await Promise.all([ensureCatalog(), getRecommender(true)])
     const missing = missingTrackIds(catalog.tracks, vectors)
     const total = new Set(catalog.tracks.map((track) => track.id)).size
     const cached = Math.max(0, total - missing.length)
+
+    // Nothing to fetch (and no catalog yet): stay quiet instead of reporting a
+    // completed prefetch on every status call.
+    if (total === 0) {
+      prefetchState = {
+        running: false,
+        waitingAuth: false,
+        complete: true,
+        done: 0,
+        total: 0,
+        remaining: 0,
+        updatedAt: Date.now(),
+      }
+      await store.clearPrefetchJob().catch(() => {})
+      try {
+        chrome.alarms?.clear(AUTO_PREFETCH_ALARM)
+      } catch {
+      }
+      return { done: 0, total: 0 }
+    }
 
     if (missing.length === 0) {
       prefetchState = {
@@ -964,7 +872,6 @@ async function autoPrefetchMissing() {
 
 async function prefetch(onProgress) {
   await initialize()
-  await autoSeedEmbeddings().catch(() => {})
   if (autoPrefetchPromise) {
     await autoPrefetchPromise.catch(() => {})
   }
@@ -1003,7 +910,7 @@ async function importPlaylist(text) {
   } catch (error) {
     throw new Error(`The selected file is not valid JSON: ${error.message}`)
   }
-  const playlist = parsePlaylist(document)
+  const playlist = parseAnyPlaylist(document)
   await store.setCatalog(playlist)
   catalogCache = playlist
   invalidateRecommender()
@@ -1130,11 +1037,6 @@ async function handleMessage(message, sender) {
     case 'decision-log':
       if (!lastDecision) lastDecision = await store.getLastDecision()
       return { ok: true, log: lastDecision }
-    case 'embedding-status':
-      return { ok: true, seed: await store.getEmbeddingSeed() }
-    case 'ensure-embedding-seed':
-      await autoSeedEmbeddings()
-      return { ok: true, seed: await store.getEmbeddingSeed() }
     case 'ensure-prefetch':
       autoPrefetchMissing().catch(() => {})
       return { ok: true, prefetch: prefetchState }
@@ -1272,8 +1174,6 @@ async function handleMessage(message, sender) {
       return { ok: true }
     case 'reset-vectors':
       await store.clearVectorCache()
-      await store.clearEmbeddingSeed()
-      seedPromise = null
       autoPrefetchPromise = null
       invalidateCachedEmbeddings()
       invalidateRecommender()
@@ -1314,7 +1214,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   initialize()
-    .then(() => autoSeedEmbeddings())
     .then(() => autoPrefetchMissing())
     .catch((error) => console.error('initialization failed', error))
 })
@@ -1333,7 +1232,6 @@ chrome.runtime.onStartup.addListener(() => {
   updateTabs(() => ({})).catch(() => {})
   initialize()
     .then(() => store.resetSessionPlays())
-    .then(() => autoSeedEmbeddings())
     .then(() => autoPrefetchMissing())
     .catch((error) => console.error('initialization failed', error))
 })

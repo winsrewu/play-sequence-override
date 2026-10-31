@@ -61,19 +61,6 @@ async function load() {
   fillForm(config)
   renderMeta(config)
   try {
-    const status = await chrome.runtime.sendMessage({ type: 'ensure-embedding-seed' })
-    if (status?.ok && status.seed?.count) {
-      $('embedding-import-status').textContent =
-        `Bundled embeddings ready: ${status.seed.count} imported` +
-        (status.seed.ignored ? ` · ignored ${status.seed.ignored} without a playlist track.` : '.')
-      if (Date.now() - Number(status.seed.importedAt || 0) < 300000) {
-        const progress = $('embedding-progress')
-        progress.classList.remove('hidden')
-        progress.max = status.seed.count
-        progress.value = status.seed.count
-        setTimeout(() => progress.classList.add('hidden'), 2500)
-      }
-    }
     chrome.runtime
       .sendMessage({ type: 'ensure-prefetch' })
       .then((response) => {
@@ -153,50 +140,9 @@ $('copy-host').addEventListener('click', async () => {
   }
 })
 
-function setEmbeddingProgress(done, total, label) {
-  const progress = $('embedding-progress')
-  progress.classList.remove('hidden')
-  progress.max = Math.max(1, total)
-  progress.value = Math.min(done, total)
-  $('embedding-import-status').textContent = label
-  if (total > 0 && done >= total) {
-    setTimeout(() => progress.classList.add('hidden'), 2500)
-  }
-}
-
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'prefetch-progress') {
     renderPrefetchState(message)
-    return
-  }
-  if (message?.type !== 'embedding-import-progress') return
-  const ignored = message.ignored || 0
-  if (message.phase === 'auto') {
-    if (message.error) {
-      $('embedding-import-status').textContent = `Automatic embedding import failed: ${message.error}`
-      return
-    }
-    if (message.total === 0) {
-      $('embedding-import-status').textContent = ignored
-        ? `Bundled embeddings already present; ignored ${ignored} entries without a playlist track.`
-        : 'Bundled embeddings are already present.'
-      return
-    }
-    setEmbeddingProgress(
-      message.done,
-      message.total,
-      `Importing bundled embeddings ${message.done}/${message.total}` +
-        (ignored ? ` · ignored ${ignored}` : ''),
-    )
-    return
-  }
-  if (message.phase === 'manual') {
-    setEmbeddingProgress(
-      message.fileIndex,
-      message.fileCount,
-      `Importing ${message.fileName || 'embedding file'} · ${message.count || 0} accepted` +
-        (ignored ? ` · ignored ${ignored}` : ''),
-    )
   }
 })
 

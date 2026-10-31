@@ -154,23 +154,13 @@ function render(status, tab = null) {
     status.catalogCount,
     status.embeddedCount,
   )
-  $('vector-status').textContent = status.vectorError
-    ? `Embedding bundle error: ${status.vectorError}`
-    : missing > 0
-      ? `${missing} track${missing === 1 ? '' : 's'} need vectors; fetching automatically when connected`
-      : 'Every track has a vector.'
-  if (status.embeddingSeed?.count && !$('embedding-progress-label').textContent) {
-    $('embedding-progress-label').textContent =
-      `Bundled embeddings ready: ${status.embeddingSeed.count}` +
-      (status.embeddingSeed.ignored ? ` · ignored ${status.embeddingSeed.ignored}` : '')
-    if (Date.now() - Number(status.embeddingSeed.importedAt || 0) < 300000) {
-      const progress = $('embedding-progress')
-      progress.classList.remove('hidden')
-      progress.max = status.embeddingSeed.count
-      progress.value = status.embeddingSeed.count
-      setTimeout(() => progress.classList.add('hidden'), 2500)
-    }
-  }
+  $('vector-status').textContent = status.catalogMissing
+    ? 'No catalog yet — use Import JSON to load a playlist.'
+    : status.vectorError
+      ? `Embedding error: ${status.vectorError}`
+      : missing > 0
+        ? `${missing} track${missing === 1 ? '' : 's'} need vectors; fetching automatically when connected`
+        : 'Every track has a vector.'
 
   const history = $('history')
   history.replaceChildren()
@@ -385,33 +375,6 @@ $('decision-download').addEventListener('click', () => {
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'data-changed') {
     refresh()
-    return
-  }
-  if (message?.type === 'embedding-import-progress') {
-    const progress = $('embedding-progress')
-    const label = $('embedding-progress-label')
-    if (message.error) {
-      label.textContent = `Automatic embedding import failed: ${message.error}`
-      progress.classList.add('hidden')
-      return
-    }
-    if (message.total > 0) {
-      progress.classList.remove('hidden')
-      progress.max = Math.max(1, message.total)
-      progress.value = Math.min(message.done, message.total)
-      label.textContent = `Importing bundled embeddings ${message.done}/${message.total}` +
-        (message.ignored ? ` · ignored ${message.ignored}` : '')
-      if (message.complete) {
-        setTimeout(() => {
-          progress.classList.add('hidden')
-          label.textContent = `Bundled embeddings imported${message.ignored ? ` · ignored ${message.ignored}` : ''}.`
-        }, 1200)
-      }
-    } else if (message.complete) {
-      label.textContent = message.ignored
-        ? `Bundled embeddings ready · ignored ${message.ignored} entries without a playlist track.`
-        : 'Bundled embeddings ready.'
-    }
     return
   }
   if (message?.type !== 'prefetch-progress') return

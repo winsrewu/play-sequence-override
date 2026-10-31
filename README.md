@@ -51,17 +51,8 @@ The exact callback host and scope requirements are in the extension's **Settings
 
 ### 3. Extension
 
-Build the loadable extension. This copies the source to the ignored `build/`
-directory and includes no data; import the catalog inside the extension:
-
-```bash
-scripts/build_extension.sh
-```
-
-Then:
-
 1. Open `edge://extensions`, enable Developer mode, and **Load unpacked**
-   `build/extension`.
+   `extension`.
 2. Open **Settings & allowlist** and set the gateway and embedding URLs.
 3. Add the allowlist host to the gateway configuration if you have not already
    done so.
@@ -80,6 +71,17 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
 
 Then set the embedding URL to `http://localhost:8000/v1/embed` and enable
 **Local development** in the extension. Never expose `DEV_MODE` publicly.
+
+## Development
+
+`extension/` is the loadable plugin; there is no build and nothing to keep in
+sync.
+
+```bash
+cd extension
+npm run check
+npm test
+```
 
 ## Versioning
 

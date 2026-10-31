@@ -1,4 +1,4 @@
-// Copy vector views into exact backing stores; Chromium rejects bundle subarray views in IndexedDB.
+// Copy vector views into exact backing stores; Chromium rejects subarray views in IndexedDB.
 const DB_NAME = 'jawbts-play-sequence'
 const DB_VERSION = 1
 export const KV_STORE = 'kv'

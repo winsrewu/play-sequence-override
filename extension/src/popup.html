@@ -62,8 +62,6 @@
         </div>
         <button id="prefetch" class="secondary" type="button">Prefetch vectors</button>
       </div>
-      <progress id="embedding-progress" max="1" value="0" class="hidden"></progress>
-      <p id="embedding-progress-label" class="hint"></p>
       <progress id="prefetch-progress" max="1" value="0" class="hidden"></progress>
       <p id="prefetch-label" class="hint"></p>
       <button id="prefetch-auth" class="secondary small hidden" type="button">
@@ -71,7 +69,7 @@
       </button>
 
       <div class="row actions">
-        <label class="file-button">
+        <label class="file-button" title="v2 playlist or legacy music.json">
           Import JSON
           <input id="import-file" type="file" accept="application/json,.json" hidden />
         </label>

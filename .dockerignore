@@ -1,6 +1,5 @@
 .git
 .env
-build/
 artifacts/
 extension/
 server/.pytest_cache/

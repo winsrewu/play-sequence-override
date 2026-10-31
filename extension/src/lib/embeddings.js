@@ -1,53 +1,13 @@
-// Bundled 960-D vectors plus the IndexedDB cache; the backend never stores vectors.
+// 960-D vectors live only in IndexedDB; the extension imports or fetches them.
 import {
   getVectorCache,
   setVectorCacheEntries,
   setVectorCacheEntry,
 } from './storage.js'
 
-const BUNDLED_INDEX = 'data/embeddings-index.json'
-const BUNDLED_BIN = 'data/embeddings.bin'
+const DEFAULT_DIM = 960
 
-let bundlePromise = null
 let cachedPromise = null
-
-export async function loadBundledEmbeddings() {
-  if (!bundlePromise) {
-    bundlePromise = (async () => {
-      const [indexResponse, binResponse] = await Promise.all([
-        fetch(chrome.runtime.getURL(BUNDLED_INDEX), { cache: 'no-store' }),
-        fetch(chrome.runtime.getURL(BUNDLED_BIN), { cache: 'no-store' }),
-      ])
-      if (!indexResponse.ok || !binResponse.ok) {
-        throw new Error('bundled embeddings are unavailable')
-      }
-      const index = await indexResponse.json()
-      const buffer = await binResponse.arrayBuffer()
-      const dim = Number(index.dim)
-      const ids = Array.isArray(index.ids) ? index.ids : []
-      if (!Number.isInteger(dim) || dim <= 0) throw new Error('invalid embedding dimension')
-      if (buffer.byteLength !== ids.length * dim * 4) {
-        throw new Error('embedding bundle size does not match its index')
-      }
-      const data = new Float32Array(buffer)
-      const map = new Map()
-      for (let i = 0; i < ids.length; i += 1) {
-        map.set(ids[i], data.subarray(i * dim, (i + 1) * dim))
-      }
-      return {
-        dim,
-        model: index.model || null,
-        ids,
-        vectors: map,
-        sha256: typeof index.sha256 === 'string' ? index.sha256 : null,
-      }
-    })().catch((error) => {
-      bundlePromise = null
-      throw error
-    })
-  }
-  return bundlePromise
-}
 
 export async function loadCachedEmbeddings() {
   if (!cachedPromise) {
@@ -86,13 +46,9 @@ export async function cacheEmbeddings(vectors) {
 }
 
 export async function loadAllVectors() {
-  const [bundle, cached] = await Promise.all([
-    loadBundledEmbeddings().catch(() => ({ vectors: new Map(), dim: 960, ids: [] })),
-    loadCachedEmbeddings(),
-  ])
-  const merged = new Map(bundle.vectors)
-  for (const [id, vector] of cached) merged.set(id, vector)
-  return { vectors: merged, dim: bundle.dim || 960, bundledCount: bundle.vectors.size }
+  const vectors = await loadCachedEmbeddings()
+  const dim = vectors.values().next().value?.length || DEFAULT_DIM
+  return { vectors, dim }
 }
 
 export function missingTrackIds(tracks, vectors) {

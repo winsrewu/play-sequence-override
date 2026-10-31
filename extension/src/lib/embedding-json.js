@@ -30,7 +30,11 @@ export function parseEmbeddingJson(document, { dim = EMBEDDING_DIM } = {}) {
     if (!entry || typeof entry !== 'object') {
       throw new Error(`data[${index}] is not an object`)
     }
-    const internalId = internalIdFromEmbeddingName(String(entry.name || ''))
+    const name = typeof entry.name === 'string' ? entry.name.trim() : ''
+    // A legacy data folder mixes music.json in; entries without a file name are
+    // not vectors and are skipped rather than failing the whole import.
+    if (!name) continue
+    const internalId = internalIdFromEmbeddingName(name)
     if (internalId === null) continue
     if (!Array.isArray(entry.embed)) {
       throw new Error(`${entry.name}: embed is not an array`)

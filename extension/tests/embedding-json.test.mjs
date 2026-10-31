@@ -61,3 +61,15 @@ test('real C file shape is accepted', () => {
   const vectors = parseEmbeddingJson(document)
   assert.equal(vectors.size, 5)
 })
+
+test('a legacy data folder may include music.json alongside the vectors', () => {
+  const vectors = parseEmbeddingJson({
+    data: [
+      { inner_id: 'BBV16y4y127Dz', title: 'music.json entry' },
+      { name: '', embed: vector(0.1) },
+      { name: 'BV1114y127ih.mp3', embed: vector(0.25) },
+    ],
+  })
+  assert.equal(vectors.size, 1)
+  assert.equal(vectors.get('BBV1114y127ih')[0], 0.25)
+})

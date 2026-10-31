@@ -84,14 +84,65 @@ export function trackFromEntry(raw) {
   }
 }
 
-function playlistFromEntries(entries) {
-  const tracks = entries.map(trackFromEntry)
+function assertUnique(tracks) {
   const seen = new Set()
   for (const track of tracks) {
     if (seen.has(track.id)) throw new PlaylistError(`duplicate internal id ${track.id}`)
     seen.add(track.id)
   }
+}
+
+function playlistFromEntries(entries) {
+  const tracks = entries.map(trackFromEntry)
+  assertUnique(tracks)
   return { format: FORMAT, version: VERSION, generatedAt: null, tracks }
+}
+
+// The C app's music.json: { async_time, data: [{ inner_id, title, ... }] }.
+// Author, tags, likes and anything else are dropped.
+export function parseLegacyPlaylist(document) {
+  if (!document || typeof document !== 'object' || Array.isArray(document)) {
+    throw new PlaylistError('legacy music.json root must be a JSON object')
+  }
+  if (!Array.isArray(document.data)) {
+    throw new PlaylistError('legacy music.json must contain a "data" array')
+  }
+  const tracks = document.data.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new PlaylistError(`data[${index}] is not an object`)
+    }
+    const inner = entry.inner_id
+    if (typeof inner !== 'string' || !inner) {
+      throw new PlaylistError(`data[${index}] is missing inner_id`)
+    }
+    let internal
+    try {
+      internal = parseInternalId(inner)
+    } catch (error) {
+      throw new PlaylistError(`data[${index}]: ${error.message}`)
+    }
+    return {
+      id: internal.id,
+      provider: internal.provider,
+      videoId: internal.videoId,
+      video_id: internal.videoId,
+      page: internal.page,
+      title: String(entry.title || ''),
+    }
+  })
+  assertUnique(tracks)
+  return { format: FORMAT, version: VERSION, generatedAt: null, tracks }
+}
+
+// Imported files may be a v2 playlist or a legacy music.json.
+export function parseAnyPlaylist(document) {
+  if (document && typeof document === 'object' && !Array.isArray(document)) {
+    if (document.format === FORMAT) return parsePlaylist(document)
+    if (Array.isArray(document.data)) return parseLegacyPlaylist(document)
+  }
+  throw new PlaylistError(
+    'expected a v2 playlist (format, version, tracks) or a legacy music.json (data array of inner_id)',
+  )
 }
 
 export function parsePlaylist(document) {

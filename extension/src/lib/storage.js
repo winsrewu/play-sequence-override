@@ -17,9 +17,9 @@ export const KEYS = Object.freeze({
   sessionPlays: 'sessionPlays',
   oauthState: 'oauthState',
   lastDecision: 'lastDecision',
-  embeddingSeed: 'embeddingSeed',
   prefetchJob: 'prefetchJob',
   tabRegistry: 'tabRegistry',
+  derived: 'derived',
   migrated: 'migrated_v2',
 })
 
@@ -188,19 +188,6 @@ export async function clearLastDecision() {
   await kvDelete(KEYS.lastDecision)
 }
 
-export async function getEmbeddingSeed() {
-  await ensureMigrated()
-  return (await kvGet(KEYS.embeddingSeed, null)) || null
-}
-
-export async function setEmbeddingSeed(seed) {
-  await kvSet(KEYS.embeddingSeed, seed)
-}
-
-export async function clearEmbeddingSeed() {
-  await kvDelete(KEYS.embeddingSeed)
-}
-
 export async function getPrefetchJob() {
   await ensureMigrated()
   return (await kvGet(KEYS.prefetchJob, null)) || null
@@ -239,6 +226,17 @@ export async function getTabRegistry() {
 
 export async function setTabRegistry(tabs) {
   await kvSet(KEYS.tabRegistry, tabs)
+}
+
+// Style clusters and projection derived from the vectors and cached.
+export async function getDerived() {
+  await ensureMigrated()
+  const stored = await kvGet(KEYS.derived, null)
+  return stored && typeof stored === 'object' ? stored : null
+}
+
+export async function setDerived(record) {
+  await kvSet(KEYS.derived, record)
 }
 
 export async function resetSessionPlays() {

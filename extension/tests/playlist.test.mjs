@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import test from 'node:test'
 
-import { dataDir } from './data-dir.mjs'
-
 import {
   buildInternalId,
   exportV2,
+  parseAnyPlaylist,
   parseInternalId,
+  parseLegacyPlaylist,
   parsePlaylist,
   playlistSummary,
   PlaylistError,
@@ -17,9 +17,7 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..', '..')
-const catalogPath = existsSync(path.join(root, 'server/data/music.v2.json'))
-  ? path.join(root, 'server/data/music.v2.json')
-  : path.join(dataDir, 'music.v2.json')
+const catalogPath = path.join(root, 'server', 'data', 'music.v2.json')
 const catalog = JSON.parse(readFileSync(catalogPath, 'utf8'))
 
 test('internal ids parse and build canonically', () => {
@@ -97,4 +95,55 @@ test('unknown fields are rejected', () => {
 test('unsupported formats are rejected', () => {
   assert.throws(() => parsePlaylist({ format: 'other', version: 2, tracks: [] }), /unsupported playlist format/)
   assert.throws(() => parsePlaylist({ format: 'jawbts.music-playlist', version: 3, tracks: [] }), /unsupported playlist version/)
+})
+
+test('legacy music.json converts and drops its extra metadata', () => {
+  const legacy = {
+    async_time: 123,
+    data: [
+      {
+        inner_id: 'BBV16y4y127Dz',
+        title: 'one',
+        likes: 4,
+        author: 'someone',
+        tags: ['tag'],
+        static_tags: ['static'],
+        unknown: true,
+      },
+      { inner_id: 'BBV1Xx4y1277K_2', title: 'two' },
+    ],
+  }
+  const playlist = parseLegacyPlaylist(legacy)
+  assert.equal(playlist.format, 'jawbts.music-playlist')
+  assert.equal(playlist.version, 2)
+  assert.deepEqual(playlist.tracks, [
+    { id: 'BBV16y4y127Dz', provider: 'bilibili', videoId: 'BV16y4y127Dz', video_id: 'BV16y4y127Dz', page: 1, title: 'one' },
+    { id: 'BBV1Xx4y1277K_2', provider: 'bilibili', videoId: 'BV1Xx4y1277K', video_id: 'BV1Xx4y1277K', page: 2, title: 'two' },
+  ])
+})
+
+test('legacy music.json rejects malformed entries', () => {
+  assert.throws(() => parseLegacyPlaylist([]), /root must be a JSON object/)
+  assert.throws(() => parseLegacyPlaylist({}), /must contain a "data" array/)
+  assert.throws(() => parseLegacyPlaylist({ data: [null] }), /data\[0\] is not an object/)
+  assert.throws(() => parseLegacyPlaylist({ data: [{}] }), /data\[0\] is missing inner_id/)
+  assert.throws(() => parseLegacyPlaylist({ data: [{ inner_id: 'nope' }] }), /data\[0\]/)
+  assert.throws(
+    () =>
+      parseLegacyPlaylist({
+        data: [{ inner_id: 'BBV16y4y127Dz' }, { inner_id: 'BBV16y4y127Dz' }],
+      }),
+    /duplicate/,
+  )
+})
+
+test('parseAnyPlaylist accepts v2 and legacy, rejects anything else', () => {
+  assert.equal(parseAnyPlaylist(catalog).tracks.length, catalog.tracks.length)
+  assert.equal(parseAnyPlaylist({ data: [{ inner_id: 'BBV16y4y127Dz' }] }).tracks.length, 1)
+  assert.throws(() => parseAnyPlaylist({ hello: 'world' }), /expected a v2 playlist/)
+  assert.throws(() => parseAnyPlaylist('nope'), /expected a v2 playlist/)
+})
+
+test('parsePlaylist stays strict about legacy files', () => {
+  assert.throws(() => parsePlaylist({ data: [{ inner_id: 'BBV16y4y127Dz' }] }), /unexpected playlist field/)
 })

@@ -8,15 +8,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
-.build-venv/
 *.egg-info/
 .coverage
 .coverage.*
 htmlcov/
 
 node_modules/
-build*/
-extension/data/
 artifacts/
 dist/
 *.zip

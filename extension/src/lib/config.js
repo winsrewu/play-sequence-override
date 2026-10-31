@@ -16,7 +16,6 @@ export const DEFAULT_CONFIG = Object.freeze({
 })
 
 export const APP_NAME = 'Play Sequence Override'
-export const DEFAULT_CATALOG_URL = 'data/music.v2.json'
 
 function trimSlash(value) {
   return value.replace(/\/+$/, '')

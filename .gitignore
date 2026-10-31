@@ -15,7 +15,7 @@ __pycache__/
 htmlcov/
 
 node_modules/
-build/
+build*/
 extension/data/
 artifacts/
 dist/

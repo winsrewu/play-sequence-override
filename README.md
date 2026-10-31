@@ -52,13 +52,10 @@ The exact callback host and scope requirements are in the extension's **Settings
 ### 3. Extension
 
 Build the loadable extension. This copies the source to the ignored `build/`
-directory and regenerates its catalog, vector matrix, projection, and style
-labels from the C data:
+directory and includes no data; import the catalog inside the extension:
 
 ```bash
-python3 -m venv .build-venv
-.build-venv/bin/pip install numpy==1.26.4 scikit-learn==1.5.2
-PYTHON=.build-venv/bin/python scripts/build_extension.sh
+scripts/build_extension.sh
 ```
 
 Then:

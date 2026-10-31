@@ -2,8 +2,9 @@ name: Prune image versions
 
 # Keeps the newest non-version image versions and deletes the rest. Versions
 # that carry a version tag (0.4, 0.4.1, v0.4, 1.0.0-rc.1) are never touched.
-# GITHUB_TOKEN can only address packages linked to this repository; a package
-# that exists only under the user/org namespace needs a PAT instead.
+# GITHUB_TOKEN needs Admin access to the package (Package settings -> Manage
+# Actions access); otherwise set a classic PAT with read:packages +
+# delete:packages as the GHCR_TOKEN secret.
 on:
   schedule:
     - cron: "45 11 * * *"
@@ -12,15 +13,10 @@ on:
       keep:
         description: How many non-version image versions to keep
         default: "5"
-      dry_run:
-        description: List what would be deleted without deleting it
-        type: boolean
-        default: false
 
 permissions:
   contents: read
   packages: write
-  actions: read
 
 concurrency:
   group: prune-image-versions
@@ -30,92 +26,10 @@ jobs:
   prune:
     runs-on: ubuntu-latest
     steps:
-      - name: Delete old image versions
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
-          SERVER: ${{ github.server_url }}
-          PACKAGE: ${{ github.event.repository.name }}
-          KEEP: ${{ inputs.keep || '5' }}
-          DRY_RUN: ${{ inputs.dry_run || false }}
-        run: |
-          set -euo pipefail
-          package="${PACKAGE,,}"
-          version_re='^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
-          if ! [[ "${KEEP}" =~ ^[0-9]+$ ]] || (( KEEP < 1 )); then
-            echo "::error::keep must be a positive integer, got ${KEEP}"
-            exit 1
-          fi
-
-          # A package is addressable only when it is linked to this repository
-          # and is spelled the way GHCR stored it. Fall back to the repository's
-          # container package list instead of assuming it never existed.
-          resolve() {
-            gh api --paginate --jq '.[]' \
-              "repos/${REPOSITORY}/packages/container/$1/versions?per_page=100" \
-              > versions.ndjson 2> error.txt
-          }
-
-          if ! resolve "${package}"; then
-            if ! grep -qi "HTTP 404" error.txt; then
-              cat error.txt >&2
-              exit 1
-            fi
-            # gh prints an HTTP error body on stdout, so only trust stdout when
-            # the call actually succeeded; the guard also ignores non-array bodies.
-            names=""
-            if listed=$(gh api "repos/${REPOSITORY}/packages?package_type=container" \
-                --jq 'if type == "array" then .[].name else empty end' 2> /dev/null); then
-              names=$(printf '%s\n' "${listed}" | grep -E '^[A-Za-z0-9._-]+$' || true)
-            fi
-            count=$(printf '%s\n' "${names}" | grep -c . || true)
-            match=$(printf '%s\n' "${names}" | grep -i -F -x "${package}" | head -n 1 || true)
-            if [ -n "${match}" ]; then
-              echo "::notice::Using package '${match}' (cased differently than the expected name)."
-              resolve "${match}" || { cat error.txt >&2; exit 1; }
-              package="${match}"
-            elif [ "${count}" = "1" ]; then
-              only=$(printf '%s\n' "${names}" | head -n 1)
-              echo "::notice::Using the repository's only container package '${only}'."
-              resolve "${only}" || { cat error.txt >&2; exit 1; }
-              package="${only}"
-            else
-              docker_run=""
-              if latest=$(gh api "repos/${REPOSITORY}/actions/workflows/docker.yml/runs?per_page=1" \
-                  --jq '(.workflow_runs[0] // empty) | "\(.status)/\(.conclusion) on \(.head_branch) \(.html_url)"' 2> /dev/null) \
-                  && [ -n "${latest}" ]; then
-                docker_run=" Latest Docker workflow run: ${latest}."
-              fi
-              echo "::notice::No container package '${package}' under ${REPOSITORY}; linked container packages: [$(printf '%s\n' "${names}" | paste -sd, - | sed 's/,$//')].${docker_run} Nothing was deleted. If the image exists on GHCR but is not linked, link it to this repository."
-              exit 0
-            fi
-          fi
-
-          api="repos/${REPOSITORY}/packages/container/${package}/versions"
-
-          # Version-tagged images are protected; everything else is sorted
-          # newest first and only the first KEEP survive.
-          jq -s --arg re "${version_re}" '
-            [ .[]
-              | select(((.metadata.container.tags // []) | map(select(test($re))) | length) == 0)
-            ]
-            | sort_by(.created_at) | reverse
-          ' versions.ndjson > candidates.json
-
-          total=$(jq 'length' candidates.json)
-          kept=$(( total < KEEP ? total : KEEP ))
-          echo "package ${package}: ${total} non-version versions; keeping ${kept}, deleting $(( total - kept ))"
-          if [ "${DRY_RUN}" = "true" ]; then
-            echo "dry run: no versions will be deleted"
-          fi
-
-          jq -r --argjson keep "${KEEP}" '.[$keep:][] | .id' candidates.json > stale.txt
-          while read -r id; do
-            [ -n "${id}" ] || continue
-            if [ "${DRY_RUN}" = "true" ]; then
-              echo "would delete version ${id}"
-            else
-              gh api -X DELETE "${api}/${id}"
-              echo "deleted version ${id}"
-            fi
-          done < stale.txt
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}
+          package-type: container
+          min-versions-to-keep: ${{ inputs.keep || 5 }}
+          ignore-versions: '^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          token: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}

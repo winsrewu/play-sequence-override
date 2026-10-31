@@ -1,0 +1,80 @@
+name: Prune image versions
+
+# Keeps the newest non-version image versions and deletes the rest. Versions
+# that carry a version tag (0.4, 0.4.1, v0.4) are never touched.
+on:
+  schedule:
+    - cron: "45 11 * * *"
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: How many non-version image versions to keep
+        default: "5"
+      dry_run:
+        description: List what would be deleted without deleting it
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: prune-image-versions
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old image versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PACKAGE: ${{ github.event.repository.name }}
+          KEEP: ${{ inputs.keep || '5' }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+          package="${PACKAGE,,}"
+          version_re='^v?[0-9]+\.[0-9]+(\.[0-9]+)*$'
+          if ! [[ "${KEEP}" =~ ^[0-9]+$ ]] || (( KEEP < 1 )); then
+            echo "::error::keep must be a positive integer, got ${KEEP}"
+            exit 1
+          fi
+          api="repos/${REPOSITORY}/packages/container/${package}/versions"
+
+          # Stream every page, one version object per line. A missing package
+          # (nothing pushed yet) is not an error.
+          if ! gh api --paginate --jq '.[]' "${api}?per_page=100" > versions.ndjson 2> error.txt; then
+            if grep -qi "HTTP 404" error.txt; then
+              echo "::notice::No container package ${package} yet."
+              exit 0
+            fi
+            cat error.txt >&2
+            exit 1
+          fi
+
+          # Version-tagged images are protected; everything else is sorted
+          # newest first and only the first KEEP survive.
+          jq -s --arg re "${version_re}" '
+            [ .[]
+              | select(((.metadata.container.tags // []) | map(select(test($re))) | length) == 0)
+            ]
+            | sort_by(.created_at) | reverse
+          ' versions.ndjson > candidates.json
+
+          total=$(jq 'length' candidates.json)
+          kept=$(( total < KEEP ? total : KEEP ))
+          echo "non-version versions: ${total}; keeping ${kept}, deleting $(( total - kept ))"
+
+          jq -r --argjson keep "${KEEP}" '.[$keep:][] | .id' candidates.json > stale.txt
+          while read -r id; do
+            [ -n "${id}" ] || continue
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "would delete version ${id}"
+            else
+              gh api -X DELETE "${api}/${id}"
+              echo "deleted version ${id}"
+            fi
+          done < stale.txt

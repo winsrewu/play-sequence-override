@@ -1,10 +1,10 @@
 name: Prune image versions
 
-# Keeps the newest non-version image versions and deletes the rest. Versions
-# that carry a version tag (0.4, 0.4.1, v0.4, 1.0.0-rc.1) are never touched.
-# GITHUB_TOKEN needs Admin access to the package (Package settings -> Manage
-# Actions access); otherwise set a classic PAT with read:packages +
-# delete:packages as the GHCR_TOKEN secret.
+# Keeps the newest 5 images that carry no version tag and deletes the rest.
+# Version-tagged images (0.4, 0.4.1, v0.4, 1.0.0-rc.1) are excluded from every
+# rule and can never be deleted. The packages REST API needs Admin access for
+# GITHUB_TOKEN (Package settings -> Manage Actions access); otherwise set a
+# classic PAT with read:packages + delete:packages as GHCR_TOKEN.
 on:
   schedule:
     - cron: "45 11 * * *"
@@ -13,6 +13,10 @@ on:
       keep:
         description: How many non-version image versions to keep
         default: "5"
+      dry_run:
+        description: List what would be deleted without deleting it
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -26,10 +30,13 @@ jobs:
   prune:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/delete-package-versions@v5
+      - uses: dataaxiom/ghcr-cleanup-action@v1
         with:
-          package-name: ${{ github.event.repository.name }}
-          package-type: container
-          min-versions-to-keep: ${{ inputs.keep || 5 }}
-          ignore-versions: '^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
           token: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+          package: ${{ github.event.repository.name }}
+          # Tags, not version names: the official action matches digests here.
+          exclude-tags: '^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          use-regex: true
+          keep-n-tagged: ${{ inputs.keep || 5 }}
+          delete-untagged: true
+          dry-run: ${{ inputs.dry_run || false }}

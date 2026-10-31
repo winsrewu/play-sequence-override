@@ -575,6 +575,7 @@ async function selectNext({
   currentId = null,
   targetSimilarity = null,
   tuningOverride = null,
+  newTab = false,
 } = {}) {
   await initialize()
   const [config, catalog] = await Promise.all([getConfig(), ensureCatalog()])
@@ -647,12 +648,34 @@ async function selectNext({
   console.info('[jawbts] next-track decision', lastDecision)
   await store.setLastDecision(lastDecision).catch(() => {})
 
-  await navigate(tabId, track, config.softNavigation)
+  if (newTab) await chrome.tabs.create({ url: trackUrl(track) })
+  else await navigate(tabId, track, config.softNavigation)
   return {
     ok: true,
     current: trackMeta(catalog.tracks.find((entry) => entry.id === current)),
     next: trackMeta(track),
   }
+}
+
+// The page cannot host the sequence, so keep it untouched and open the next track in a new tab.
+async function launch({ targetSimilarity = null } = {}) {
+  await initialize()
+  const current = await store.getCurrent()
+  if (current) {
+    const { recommender } = await getRecommender()
+    if (recommender.has(current)) {
+      try {
+        return await selectNext({ targetSimilarity, newTab: true })
+      } catch {
+        // An empty candidate pool still gets a tab, seeded from the playlist's first track.
+      }
+    }
+  }
+  const catalog = await ensureCatalog()
+  const track = catalog.tracks[0]
+  if (!track) throw new Error('The playlist is empty; nothing to launch.')
+  await chrome.tabs.create({ url: trackUrl(track) })
+  return { ok: true, next: trackMeta(track) }
 }
 
 async function autoPrefetchMissing() {
@@ -1007,6 +1030,8 @@ async function handleMessage(message, sender) {
         tuningOverride: message.tuning || null,
       })
     }
+    case 'launch':
+      return launch({ targetSimilarity: message.targetSimilarity })
     case 'graph-data':
       return graphData(message.targetSimilarity, message.tuning || null)
     case 'decision-log':

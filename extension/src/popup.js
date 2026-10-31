@@ -4,6 +4,7 @@ let refreshing = false
 let refreshQueued = false
 let targetSave = Promise.resolve()
 let lastDecision = null
+let launchMode = false
 
 function send(message) {
   return chrome.runtime.sendMessage(message).then((response) => {
@@ -32,7 +33,9 @@ function renderDecision(log) {
   lastDecision = log || null
   const summary = $('decision-summary')
   if (!log) {
-    summary.textContent = 'No selection yet. Press Next to produce one.'
+    summary.textContent = launchMode
+      ? 'No selection yet. Launch opens the next track in a new tab.'
+      : 'No selection yet. Press Next to produce one.'
     return
   }
   const request = log.request || {}
@@ -123,8 +126,12 @@ function render(status) {
   $('current-meta').textContent = status.current
     ? `${status.current.id} · page ${status.current.page}`
     : 'Open a Bilibili video page to begin.'
-  $('next').disabled = !status.current
-  $('next').title = status.current ? 'Select the next track' : 'No track detected'
+  $('next').textContent = status.current ? 'Next' : 'Launch'
+  $('next').disabled = false
+  $('next').title = status.current
+    ? 'Select the next track'
+    : 'Open the next track in a new tab'
+  launchMode = !status.current
 
   $('target').value = String(status.targetSimilarity)
   $('target-value').textContent = `${status.targetSimilarity}%`
@@ -252,7 +259,8 @@ $('disconnect').addEventListener('click', (event) => {
 $('next').addEventListener('click', (event) => {
   run(event.currentTarget, async () => {
     await targetSave.catch(() => {})
-    await send({ type: 'next', targetSimilarity: Number($('target').value) })
+    const targetSimilarity = Number($('target').value)
+    await send(launchMode ? { type: 'launch', targetSimilarity } : { type: 'next', targetSimilarity })
   })
 })
 

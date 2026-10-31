@@ -31,6 +31,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
+          SERVER: ${{ github.server_url }}
           PACKAGE: ${{ github.event.repository.name }}
           KEEP: ${{ inputs.keep || '5' }}
           DRY_RUN: ${{ inputs.dry_run || false }}
@@ -42,18 +43,41 @@ jobs:
             echo "::error::keep must be a positive integer, got ${KEEP}"
             exit 1
           fi
-          api="repos/${REPOSITORY}/packages/container/${package}/versions"
 
-          # Stream every page, one version object per line. A missing package
-          # (nothing pushed yet) is not an error.
-          if ! gh api --paginate --jq '.[]' "${api}?per_page=100" > versions.ndjson 2> error.txt; then
-            if grep -qi "HTTP 404" error.txt; then
-              echo "::notice::No container package ${package} yet."
+          # A package is addressable only when it is linked to this repository
+          # and is spelled the way GHCR stored it. Fall back to the repository's
+          # container package list instead of assuming it never existed.
+          resolve() {
+            gh api --paginate --jq '.[]' \
+              "repos/${REPOSITORY}/packages/container/$1/versions?per_page=100" \
+              > versions.ndjson 2> error.txt
+          }
+
+          if ! resolve "${package}"; then
+            if ! grep -qi "HTTP 404" error.txt; then
+              cat error.txt >&2
+              exit 1
+            fi
+            names=$(gh api "repos/${REPOSITORY}/packages?package_type=container" \
+              --jq '.[].name' 2> /dev/null || true)
+            count=$(printf '%s\n' "${names}" | grep -c . || true)
+            match=$(printf '%s\n' "${names}" | grep -i -F -x "${package}" | head -n 1 || true)
+            if [ -n "${match}" ]; then
+              echo "::notice::Using package '${match}' (cased differently than the expected name)."
+              resolve "${match}" || { cat error.txt >&2; exit 1; }
+              package="${match}"
+            elif [ "${count}" = "1" ]; then
+              only=$(printf '%s\n' "${names}" | head -n 1)
+              echo "::notice::Using the repository's only container package '${only}'."
+              resolve "${only}" || { cat error.txt >&2; exit 1; }
+              package="${only}"
+            else
+              echo "::notice::No container package '${package}' under ${REPOSITORY}. Linked container packages: [$(printf '%s\n' "${names}" | paste -sd, -)]. Check ${SERVER}/${REPOSITORY}/actions/workflows/docker.yml; if the image exists but is not linked, link the package to this repository."
               exit 0
             fi
-            cat error.txt >&2
-            exit 1
           fi
+
+          api="repos/${REPOSITORY}/packages/container/${package}/versions"
 
           # Version-tagged images are protected; everything else is sorted
           # newest first and only the first KEEP survive.
@@ -66,7 +90,10 @@ jobs:
 
           total=$(jq 'length' candidates.json)
           kept=$(( total < KEEP ? total : KEEP ))
-          echo "non-version versions: ${total}; keeping ${kept}, deleting $(( total - kept ))"
+          echo "package ${package}: ${total} non-version versions; keeping ${kept}, deleting $(( total - kept ))"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "dry run: no versions will be deleted"
+          fi
 
           jq -r --argjson keep "${KEEP}" '.[$keep:][] | .id' candidates.json > stale.txt
           while read -r id; do

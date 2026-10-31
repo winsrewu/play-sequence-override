@@ -1,0 +1,56 @@
+name: Version tag
+
+# VERSION is the single source of truth. When a push to main changes it, tag
+# that commit as v<version> and dispatch the Docker workflow at the tag, because
+# a tag pushed with GITHUB_TOKEN does not trigger workflows by itself.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - VERSION
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: version-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          version=$(python3 scripts/version.py)
+          python3 scripts/version.py --check
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Push the tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          existing=$(git ls-remote --tags origin "refs/tags/$tag" | cut -f1 | head -n 1)
+          if [ -n "$existing" ]; then
+            if [ "$existing" = "$GITHUB_SHA" ]; then
+              echo "tag $tag already points at $GITHUB_SHA"
+              exit 0
+            fi
+            echo "::error::tag $tag already exists at $existing; bump VERSION again"
+            exit 1
+          fi
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"
+
+      - name: Build the release image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: gh workflow run docker.yml --ref "$TAG"

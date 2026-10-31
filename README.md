@@ -81,6 +81,21 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
 Then set the embedding URL to `http://localhost:8000/v1/embed` and enable
 **Local development** in the extension. Never expose `DEV_MODE` publicly.
 
+## Versioning
+
+`VERSION` at the repository root is the single source of truth. The plugin
+manifests and the Docker image label derive from it:
+
+```bash
+$EDITOR VERSION                        # e.g. 0.4.0
+python3 scripts/version.py --write     # sync extension/manifest.json and package.json
+```
+
+Commit both changes. A push to `main` that modifies `VERSION` makes CI create
+the matching `v<version>` tag on that commit, which is what the Docker workflow
+builds and tags from. CI fails when a tag does not match `VERSION` or when a
+version bump leaves a manifest behind.
+
 ## License
 
 Play Sequence Override is licensed under the **GNU General Public License,

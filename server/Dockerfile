@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
 FROM python:3.12-slim
 
+# Release version, from the repository VERSION file (see scripts/version.py).
+ARG VERSION=dev
+LABEL org.opencontainers.image.version="${VERSION}"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

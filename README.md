@@ -71,6 +71,10 @@ Then:
 4. Click **Sign in** and complete the protected OAuth webview.
 5. Open a Bilibili video page. Use **Next** or enable **Auto-advance**.
 
+Only one detected video tab drives the sequence. The first page detected keeps
+it, the other video tabs stay disabled, and closing that page hands control to
+the next surviving tab.
+
 For a loopback-only development deployment without OAuth:
 
 ```bash

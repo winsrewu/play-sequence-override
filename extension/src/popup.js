@@ -104,7 +104,7 @@ function remaining(state) {
   return Number(state?.remaining) || 0
 }
 
-function render(status) {
+function render(status, tab = null) {
   const connected = Boolean(status.session?.connected)
   const devMode = Boolean(status.session?.devMode)
   $('connection-pill').textContent = devMode ? 'dev' : connected ? 'connected' : 'offline'
@@ -122,15 +122,21 @@ function render(status) {
     ? 'Dev mode: no OAuth. API must run with DEV_MODE=true.'
     : `OAuth redirect: ${status.redirectUri} · allowlist host: ${status.gatewayAllowlistHost}`
 
+  // Exactly one detected tab drives the sequence; every other page stays inert.
+  const owner = status.owner || null
+  const ownedElsewhere = Boolean(owner) && owner.tabId !== tab?.id
   $('current-title').textContent = status.current?.title || 'No track detected'
   $('current-meta').textContent = status.current
-    ? `${status.current.id} · page ${status.current.page}`
+    ? `${status.current.id} · page ${status.current.page}` +
+      (ownedElsewhere ? ' · another tab is in control' : '')
     : 'Open a Bilibili video page to begin.'
   $('next').textContent = status.current ? 'Next' : 'Launch'
-  $('next').disabled = false
-  $('next').title = status.current
-    ? 'Select the next track'
-    : 'Open the next track in a new tab'
+  $('next').disabled = ownedElsewhere
+  $('next').title = ownedElsewhere
+    ? 'Another tab owns the play sequence'
+    : status.current
+      ? 'Select the next track'
+      : 'Open the next track in a new tab'
   launchMode = !status.current
 
   $('target').value = String(status.targetSimilarity)
@@ -184,9 +190,17 @@ function render(status) {
   $('version').textContent = `v${chrome.runtime.getManifest().version}`
 }
 
-async function ensureContent() {
+async function activeTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    return tab || null
+  } catch {
+    return null
+  }
+}
+
+async function ensureContent(tab) {
+  try {
     if (
       tab?.id &&
       typeof tab.url === 'string' &&
@@ -204,9 +218,10 @@ async function refresh() {
     return
   }
   refreshing = true
-  await ensureContent()
+  const tab = await activeTab()
+  await ensureContent(tab)
   try {
-    render(await send({ type: 'status' }))
+    render(await send({ type: 'status' }), tab)
     try {
       const decision = await send({ type: 'decision-log' })
       renderDecision(decision.log)

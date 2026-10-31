@@ -19,6 +19,7 @@ export const KEYS = Object.freeze({
   lastDecision: 'lastDecision',
   embeddingSeed: 'embeddingSeed',
   prefetchJob: 'prefetchJob',
+  tabRegistry: 'tabRegistry',
   migrated: 'migrated_v2',
 })
 
@@ -211,6 +212,33 @@ export async function setPrefetchJob(job) {
 
 export async function clearPrefetchJob() {
   await kvDelete(KEYS.prefetchJob)
+}
+
+// Detected video tabs survive service-worker restarts; stale shapes are dropped on read.
+export async function getTabRegistry() {
+  await ensureMigrated()
+  const stored = await kvGet(KEYS.tabRegistry, null)
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {}
+  const tabs = {}
+  for (const [key, entry] of Object.entries(stored)) {
+    const tabId = Number(key)
+    if (!Number.isInteger(tabId) || tabId <= 0) continue
+    if (!entry || typeof entry !== 'object') continue
+    if (typeof entry.id !== 'string' || !entry.id) continue
+    if (!Number.isFinite(entry.detectedAt)) continue
+    tabs[tabId] = {
+      tabId,
+      id: entry.id,
+      url: typeof entry.url === 'string' ? entry.url : null,
+      title: typeof entry.title === 'string' ? entry.title : null,
+      detectedAt: entry.detectedAt,
+    }
+  }
+  return tabs
+}
+
+export async function setTabRegistry(tabs) {
+  await kvSet(KEYS.tabRegistry, tabs)
 }
 
 export async function resetSessionPlays() {

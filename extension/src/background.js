@@ -19,6 +19,7 @@ import {
 } from './lib/embeddings.js'
 import { parseEmbeddingText } from './lib/embedding-json.js'
 import { exportV2, parsePlaylist, playlistSummary } from './lib/playlist.js'
+import { forgetTab, isVideoTabUrl, ownerTab, ownerTabId, registerTab } from './lib/sequence.js'
 import * as store from './lib/storage.js'
 import { getConfig, setConfig } from './lib/storage.js'
 
@@ -77,6 +78,89 @@ function trackMeta(track) {
     page: track.page,
     url: trackUrl(track),
   }
+}
+
+// --- Detected tabs ---------------------------------------------------------
+// One video tab drives the sequence. The first detected tab keeps ownership
+// until it closes; the survivors then re-run that decision in detection order.
+
+let tabRegistry = null
+let tabChain = Promise.resolve()
+
+async function loadTabs() {
+  if (!tabRegistry) tabRegistry = await store.getTabRegistry()
+  return tabRegistry
+}
+
+function updateTabs(update) {
+  const run = tabChain.then(async () => {
+    const current = await loadTabs()
+    const next = await update(current)
+    if (next !== current) {
+      tabRegistry = next
+      await store.setTabRegistry(next).catch(() => {})
+    }
+    return next
+  })
+  tabChain = run.then(() => {}, () => {})
+  return run
+}
+
+async function pruneTabs(tabs) {
+  let next = tabs
+  for (const key of Object.keys(tabs)) {
+    const tabId = Number(key)
+    try {
+      const tab = await chrome.tabs.get(tabId)
+      if (isVideoTabUrl(tab?.url)) continue
+    } catch {
+      // A tab that is gone cannot keep ownership.
+    }
+    next = forgetTab(next, tabId)
+  }
+  return next
+}
+
+async function ownerTabEntry() {
+  const tabs = await updateTabs(pruneTabs)
+  return ownerTab(tabs)
+}
+
+async function detectTab(tab, id) {
+  if (!Number.isInteger(tab?.id) || !isVideoTabUrl(tab.url)) return null
+  return updateTabs((tabs) =>
+    registerTab(tabs, { tabId: tab.id, id, url: tab.url, title: tab.title, at: Date.now() }),
+  )
+}
+
+// A tab the extension opens itself becomes the available one without waiting for a close.
+async function adoptTab(tab, id) {
+  if (!Number.isInteger(tab?.id)) return null
+  return updateTabs((tabs) => {
+    const earliest = Math.min(0, ...Object.values(tabs).map((entry) => entry.detectedAt ?? 0))
+    return registerTab(tabs, {
+      tabId: tab.id,
+      id,
+      url: tab.url,
+      title: tab.title,
+      at: earliest - 1,
+    })
+  })
+}
+
+// The non-elected tabs keep reporting, but they never drive playback or rewrite the current track.
+async function isOwner(tabId) {
+  const owner = await ownerTabEntry()
+  return !owner || owner.tabId === tabId
+}
+
+async function forgetDetectedTab(tabId) {
+  const before = ownerTabId(await loadTabs())
+  const tabs = await updateTabs((current) => forgetTab(current, tabId))
+  const owner = ownerTab(tabs)
+  if ((owner?.tabId ?? null) === before) return
+  if (owner?.id) await store.setCurrent(owner.id).catch(() => {})
+  broadcast({ type: 'data-changed', kind: 'owner' })
 }
 
 async function ensureCatalog() {
@@ -368,6 +452,7 @@ async function status() {
   }
 
   const byId = new Map(catalog.tracks.map((track) => [track.id, track]))
+  const owner = await ownerTabEntry()
   return {
     ok: true,
     protocol: EXTENSION_PROTOCOL,
@@ -389,6 +474,9 @@ async function status() {
     sessionPlays: plays,
     embeddingSeed: await store.getEmbeddingSeed(),
     prefetch: prefetchState,
+    owner: owner
+      ? { tabId: owner.tabId, id: owner.id, title: owner.title, url: owner.url }
+      : null,
   }
 }
 
@@ -567,7 +655,7 @@ async function navigate(tabId, track, soft) {
     await navigate(current.id, track, soft)
     return
   }
-  await chrome.tabs.create({ url })
+  await adoptTab(await chrome.tabs.create({ url }), track.id)
 }
 
 async function selectNext({
@@ -648,7 +736,7 @@ async function selectNext({
   console.info('[jawbts] next-track decision', lastDecision)
   await store.setLastDecision(lastDecision).catch(() => {})
 
-  if (newTab) await chrome.tabs.create({ url: trackUrl(track) })
+  if (newTab) await adoptTab(await chrome.tabs.create({ url: trackUrl(track) }), track.id)
   else await navigate(tabId, track, config.softNavigation)
   return {
     ok: true,
@@ -674,7 +762,7 @@ async function launch({ targetSimilarity = null } = {}) {
   const catalog = await ensureCatalog()
   const track = catalog.tracks[0]
   if (!track) throw new Error('The playlist is empty; nothing to launch.')
-  await chrome.tabs.create({ url: trackUrl(track) })
+  await adoptTab(await chrome.tabs.create({ url: trackUrl(track) }), track.id)
   return { ok: true, next: trackMeta(track) }
 }
 
@@ -1024,8 +1112,13 @@ async function handleMessage(message, sender) {
       const biliTabId = senderTab?.url?.startsWith('https://www.bilibili.com/')
         ? senderTab.id
         : null
+      const owner = await ownerTabEntry()
+      const tabId = message.tabId ?? biliTabId ?? owner?.tabId ?? null
+      if (owner && tabId != null && tabId !== owner.tabId) {
+        throw new Error('Another tab owns the play sequence.')
+      }
       return selectNext({
-        tabId: message.tabId ?? biliTabId ?? null,
+        tabId,
         targetSimilarity: message.targetSimilarity,
         tuningOverride: message.tuning || null,
       })
@@ -1091,12 +1184,21 @@ async function handleMessage(message, sender) {
       lastDecision = null
       await store.clearLastDecision()
       return { ok: true }
-    case 'play-id':
-      return playTrack(message.id, message.tabId ?? null)
-    case 'track-started':
+    case 'play-id': {
+      const owner = await ownerTabEntry()
+      return playTrack(message.id, message.tabId ?? owner?.tabId ?? null)
+    }
+    case 'track-started': {
+      const tab = sender?.tab
+      await detectTab(tab, message.id)
+      if (!(await isOwner(tab?.id))) {
+        return { ok: true, owner: false, id: message.id }
+      }
       return recordStarted(message.id, message)
+    }
     case 'track-ended': {
       if (!(await getConfig()).autoAdvance) return { ok: true, skipped: true }
+      if (!(await isOwner(sender?.tab?.id))) return { ok: true, skipped: 'not-owner' }
       const duration = Number(message.duration)
       const position = Number(message.position)
       if (!message.ended && !message.loopOverride && Number.isFinite(duration) && duration > 0) {
@@ -1189,6 +1291,20 @@ async function handleMessage(message, sender) {
   }
 }
 
+// Closing the elected tab, or navigating it off video pages, re-runs the decision.
+if (chrome.tabs?.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    forgetDetectedTab(tabId).catch(() => {})
+  })
+}
+
+if (chrome.tabs?.onUpdated) {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (!changeInfo?.url || isVideoTabUrl(changeInfo.url)) return
+    forgetDetectedTab(tabId).catch(() => {})
+  })
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
     .then(sendResponse)
@@ -1213,6 +1329,8 @@ if (chrome.alarms?.onAlarm) {
 }
 
 chrome.runtime.onStartup.addListener(() => {
+  // Tab ids are not stable across browser restarts, so the election starts fresh.
+  updateTabs(() => ({})).catch(() => {})
   initialize()
     .then(() => store.resetSessionPlays())
     .then(() => autoSeedEmbeddings())

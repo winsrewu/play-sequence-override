@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jawbts.org/schemas/music-playlist.v2.json",
+  "title": "Jawbts music playlist",
+  "description": "Versioned, provider-neutral music playlist. The loader accepts only this v2 document; the old music.json is handled by a one-way converter.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "version",
+    "tracks"
+  ],
+  "properties": {
+    "format": {
+      "const": "jawbts.music-playlist"
+    },
+    "version": {
+      "const": 2
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp; informational only."
+    },
+    "tracks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/track"
+      }
+    }
+  },
+  "$defs": {
+    "track": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "provider",
+        "video_id",
+        "page",
+        "title"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^BBV[0-9A-Za-z]{10}(_[1-9][0-9]{0,3})?$",
+          "description": "Canonical internal id: provider letter + BVID, optional _page."
+        },
+        "provider": {
+          "const": "bilibili"
+        },
+        "video_id": {
+          "type": "string",
+          "pattern": "^BV[0-9A-Za-z]{10}$"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

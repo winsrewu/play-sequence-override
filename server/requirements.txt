@@ -1,0 +1,10 @@
+# Runtime dependencies (torch is installed separately from the CPU index in the
+# Dockerfile so the image does not pull CUDA wheels).
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+PyJWT[crypto]==2.15.1
+pydantic==2.14.1
+numpy==2.5.4
+librosa==1.0.0
+soundfile==0.14.0

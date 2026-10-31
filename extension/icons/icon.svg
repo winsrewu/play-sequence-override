@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#16213e"/>
+    </linearGradient>
+    <linearGradient id="playGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00d2ff"/>
+      <stop offset="50%" stop-color="#7b2ff7"/>
+      <stop offset="100%" stop-color="#ff2e97"/>
+    </linearGradient>
+    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00d2ff"/>
+      <stop offset="100%" stop-color="#ff2e97"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景圆角方形 -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+
+  <!-- 播放三角外轮廓 -->
+  <path d="M 180 130 L 400 256 L 180 382 Z"
+        fill="none"
+        stroke="url(#playGrad)"
+        stroke-width="14"
+        stroke-linejoin="round"
+        opacity="0.9"/>
+
+  <!-- 内部神经网络节点与连线 -->
+  <g filter="url(#glow)">
+    <!-- 连线 -->
+    <line x1="197" y1="205" x2="257" y2="245" stroke="url(#nodeGrad)" stroke-width="4" opacity="0.7"/>
+    <line x1="257" y1="245" x2="317" y2="205" stroke="url(#nodeGrad)" stroke-width="4" opacity="0.7"/>
+    <line x1="257" y1="245" x2="297" y2="295" stroke="url(#nodeGrad)" stroke-width="4" opacity="0.7"/>
+    <line x1="317" y1="205" x2="337" y2="275" stroke="url(#nodeGrad)" stroke-width="4" opacity="0.7"/>
+    <line x1="297" y1="295" x2="337" y2="275" stroke="url(#nodeGrad)" stroke-width="4" opacity="0.7"/>
+    <line x1="197" y1="205" x2="227" y2="315" stroke="url(#nodeGrad)" stroke-width="4" opacity="0.5"/>
+    <line x1="227" y1="315" x2="297" y2="295" stroke="url(#nodeGrad)" stroke-width="4" opacity="0.5"/>
+
+    <!-- 节点 -->
+    <circle cx="197" cy="205" r="10" fill="#00d2ff"/>
+    <circle cx="257" cy="245" r="14" fill="#7b2ff7"/>
+    <circle cx="317" cy="205" r="10" fill="#00d2ff"/>
+    <circle cx="297" cy="295" r="11" fill="#ff2e97"/>
+    <circle cx="337" cy="275" r="9" fill="#ff2e97"/>
+    <circle cx="227" cy="315" r="8" fill="#7b2ff7" opacity="0.8"/>
+
+    <!-- 中心高亮节点 -->
+    <circle cx="257" cy="245" r="20" fill="none" stroke="#7b2ff7" stroke-width="2" opacity="0.4"/>
+  </g>
+</svg>

@@ -1,0 +1,6 @@
+# Local development: no JWT/JWKS auth. No host bind mounts and no named volumes.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+services:
+  embed:
+    environment:
+      DEV_MODE: "true"

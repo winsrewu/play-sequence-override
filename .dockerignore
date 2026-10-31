@@ -1,0 +1,11 @@
+.git
+.env
+build/
+artifacts/
+extension/
+server/.pytest_cache/
+server/**/__pycache__/
+server/**/*.pyc
+server/tests/
+server/requirements-dev.txt
+server/pyproject.toml

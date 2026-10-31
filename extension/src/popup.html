@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jawbts Play Sequence Override</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <p class="eyebrow">jawbts</p>
+        <h1>Play Sequence Override</h1>
+      </div>
+      <span id="connection-pill" class="pill">checking…</span>
+    </header>
+
+    <section class="card">
+      <div class="row">
+        <div>
+          <p class="label">Account</p>
+          <p id="account" class="value">Not connected</p>
+        </div>
+        <button id="connect" class="primary" type="button" title="Launch the protected OAuth webview">Sign in</button>
+        <button id="disconnect" class="ghost hidden" type="button">Disconnect</button>
+      </div>
+      <p id="auth-error" class="error hidden"></p>
+      <p id="allowlist" class="hint"></p>
+      <p id="auth-webview-hint" class="hint">
+        Sign in opens Chrome's protected OAuth webview; the gateway returns to the extension redirect URI.
+      </p>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <div>
+          <p class="label">Now</p>
+          <p id="current-title" class="value">No track detected</p>
+          <p id="current-meta" class="hint"></p>
+        </div>
+        <button id="next" class="primary" type="button">Next</button>
+      </div>
+      <label class="slider-label" for="target">
+        <span>Target similarity</span>
+        <output id="target-value">75%</output>
+      </label>
+      <input id="target" type="range" min="0" max="100" step="1" value="75" />
+      <p class="hint">75% matches the original C app default.</p>
+
+      <div class="row checks">
+        <label><input id="auto" type="checkbox" checked /> Auto-advance when the video ends</label>
+      </div>
+      <p id="auto-hint" class="hint"></p>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <div>
+          <p class="label">Library</p>
+          <p id="library" class="value">—</p>
+          <p id="vector-status" class="hint"></p>
+        </div>
+        <button id="prefetch" class="secondary" type="button">Prefetch vectors</button>
+      </div>
+      <progress id="embedding-progress" max="1" value="0" class="hidden"></progress>
+      <p id="embedding-progress-label" class="hint"></p>
+      <progress id="prefetch-progress" max="1" value="0" class="hidden"></progress>
+      <p id="prefetch-label" class="hint"></p>
+      <button id="prefetch-auth" class="secondary small hidden" type="button">
+        Sign in to fetch
+      </button>
+
+      <div class="row actions">
+        <label class="file-button">
+          Import JSON
+          <input id="import-file" type="file" accept="application/json,.json" hidden />
+        </label>
+        <button id="export-v2" class="secondary" type="button">Export v2</button>
+      </div>
+      <p id="library-error" class="error hidden"></p>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <p class="label">Last decision</p>
+        <div class="actions">
+          <button id="decision-copy" class="ghost small" type="button">Copy JSON</button>
+          <button id="decision-download" class="ghost small" type="button">Download</button>
+        </div>
+      </div>
+      <p id="decision-summary" class="hint">No selection yet.</p>
+    </section>
+
+    <section class="card">
+      <p class="label">Recent</p>
+      <ol id="history" class="history"></ol>
+      <button id="clear-history" class="ghost small" type="button">Clear history</button>
+    </section>
+
+    <footer>
+      <a href="#" id="open-graph">Sequence map</a>
+      <a href="#" id="open-options">Settings & allowlist</a>
+      <span id="version" class="hint"></span>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

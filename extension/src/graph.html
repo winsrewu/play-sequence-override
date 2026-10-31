@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sequence map — Play Sequence Override</title>
+    <link rel="stylesheet" href="graph.css" />
+  </head>
+  <body>
+    <h1>Sequence map</h1>
+    <p class="hint">
+      Colors show relative likelihood, top-30 rank, or raw cosine similarity.
+      The current track is ringed; click a point to play it.
+    </p>
+
+    <canvas id="map" width="900" height="620" aria-label="Track similarity map"></canvas>
+    <div id="tooltip" class="tooltip hidden"></div>
+
+    <div class="controls">
+      <label for="target">Target similarity <output id="target-value">75%</output></label>
+      <input id="target" type="range" min="0" max="100" step="1" value="75" />
+      <button id="next" type="button">Next</button>
+      <button id="mode" type="button">Show top 30 ranks</button>
+      <span id="status" class="hint"></span>
+    </div>
+
+    <div id="rank-legend" class="rank-legend hidden">
+      <span><i class="swatch red"></i>1–10 · top</span>
+      <span><i class="swatch yellow"></i>11–20 · next</span>
+      <span><i class="swatch green"></i>21–30 · next</span>
+    </div>
+
+    <details class="tuning" open>
+      <summary>Tuning</summary>
+      <div class="controls tuning-grid">
+        <div class="control">
+          <label for="history-length">History <output id="history-value">400</output></label>
+          <input id="history-length" type="range" min="10" max="400" step="10" value="400" />
+        </div>
+        <div class="control">
+          <label for="penalty-strength">Penalty <output id="penalty-value">3.0</output></label>
+          <input id="penalty-strength" type="range" min="0" max="10" step="0.5" value="3" />
+        </div>
+        <div class="control">
+          <label for="curve">Curve <output id="curve-value">0.50</output></label>
+          <input id="curve" type="range" min="0.25" max="8" step="0.01" value="0.5" />
+        </div>
+        <div class="control">
+          <label for="similarity-curve">Similarity curve <output id="similarity-value">0.50</output></label>
+          <input id="similarity-curve" type="range" min="0.25" max="8" step="0.01" value="0.5" />
+        </div>
+        <div class="control">
+          <label for="force-skip">Force-skip played <output id="force-value">1767</output></label>
+          <input id="force-skip" type="range" min="0" max="1767" step="1" value="1767" />
+        </div>
+      </div>
+    </details>
+
+    <div class="curve-grid">
+      <section class="curve-card">
+        <p id="decay-formula" class="formula">w(age) = (1 − age / (H − 1))^0.50</p>
+        <canvas id="decay-plot" width="440" height="230" aria-label="History decay curve"></canvas>
+      </section>
+      <section class="curve-card">
+        <p id="response-formula" class="formula">history influence = s^0.50</p>
+        <canvas id="response-plot" width="440" height="230" aria-label="Similarity response curve"></canvas>
+      </section>
+    </div>
+
+    <p id="error" class="error hidden"></p>
+    <p><button id="reload-extension" type="button" class="hidden">Reload extension</button></p>
+    <p class="hint">
+      Projection: KernelPCA (cosine), same as C. Hover for an id.
+    </p>
+
+    <script type="module" src="graph.js"></script>
+  </body>
+</html>

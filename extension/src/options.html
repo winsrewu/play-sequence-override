@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Play Sequence Override — Settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Play Sequence Override</h1>
+      <p class="muted">
+        These values are baked into extension storage. The default hosts are
+        <code>*.jawbts.org</code>; change them only if you deploy elsewhere.
+      </p>
+
+      <section>
+        <h2>OAuth2 / API</h2>
+        <label>
+          jawbts-api base URL
+          <input id="api-base" type="url" spellcheck="false" />
+        </label>
+        <label>
+          jawbts-gateway authorize URL
+          <input id="gateway" type="url" spellcheck="false" />
+        </label>
+        <label>
+          Embedding service URL
+          <input id="embed" type="url" spellcheck="false" />
+        </label>
+        <label>
+          Scope
+          <input id="scope" type="text" spellcheck="false" />
+        </label>
+      </section>
+
+      <section>
+        <h2>Playback</h2>
+        <label>
+          Target similarity (%)
+          <input id="target" type="number" min="0" max="100" step="1" />
+        </label>
+        <label>
+          History length (10–400)
+          <input id="history-length" type="number" min="10" max="400" step="10" />
+        </label>
+        <label>
+          Penalty strength (0–10)
+          <input id="penalty-strength" type="number" min="0" max="10" step="0.5" />
+        </label>
+        <label>
+          Decay curve (0.25–8)
+          <input id="curve" type="number" min="0.25" max="8" step="0.01" />
+        </label>
+        <label>
+          Similarity curve (0.25–8)
+          <input id="similarity-curve" type="number" min="0.25" max="8" step="0.01" />
+        </label>
+        <label>
+          Force-skip played (0–1767)
+          <input id="force-skip" type="number" min="0" max="1767" step="1" />
+        </label>
+        <label class="check">
+          <input id="soft-nav" type="checkbox" />
+          Try History-API navigation before a full page load
+        </label>
+        <label class="check">
+          <input id="auto" type="checkbox" />
+          Auto-advance when a Bilibili video ends
+        </label>
+        <label class="check">
+          <input id="dev-mode" type="checkbox" />
+          Local development (no OAuth; localhost embedding URL only)
+        </label>
+      </section>
+
+      <section>
+        <h2>Embedding data (C format)</h2>
+        <p class="muted">
+          Bundled vectors are imported automatically on first run. Names such as
+          <code>BV1114y127ih.mp3</code> map to the internal id
+          <code>BBV1114y127ih</code>. Entries whose track is not in the playlist
+          are ignored. Use the folder picker to refresh C’s changed files.
+        </p>
+        <label class="file-button">
+          Import embedding folder
+          <input id="embedding-files" type="file" accept="application/json,.json" webkitdirectory multiple hidden />
+        </label>
+        <progress id="embedding-progress" max="1" value="0" class="hidden"></progress>
+        <p id="embedding-import-status" class="muted"></p>
+        <progress id="prefetch-progress" max="1" value="0" class="hidden"></progress>
+        <p id="prefetch-status" class="muted"></p>
+      </section>
+
+      <section>
+        <h2>OAuth allowlist</h2>
+        <p class="muted">
+          jawbts-gateway only redirects to hosts in
+          <code>src/config/allowlist.ts</code>. Add this exact host, then rebuild
+          the gateway. The embedding endpoint itself is not an OAuth redirect
+          target and must not be added there.
+        </p>
+        <dl>
+          <dt>Extension ID</dt>
+          <dd><code id="extension-id">…</code></dd>
+          <dt>Redirect URI</dt>
+          <dd><code id="redirect-uri">…</code></dd>
+          <dt>Allowlist host</dt>
+          <dd><code id="allowlist-host">…</code></dd>
+          <dt>Authorize URL</dt>
+          <dd><code id="authorize-url">…</code></dd>
+        </dl>
+        <button id="copy-host" type="button">Copy allowlist host</button>
+        <button id="request-permissions" type="button">Grant access to configured hosts</button>
+        <div class="actions">
+          <button id="auth-connect" class="primary" type="button"
+            title="Launch Chrome's protected OAuth webview">
+            Sign in with protected webview
+          </button>
+        </div>
+        <p id="auth-status" class="muted"></p>
+      </section>
+
+      <div class="actions">
+        <button id="save" class="primary" type="button">Save</button>
+        <button id="reset" type="button">Reset defaults</button>
+        <span id="status" class="status"></span>
+      </div>
+    </main>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

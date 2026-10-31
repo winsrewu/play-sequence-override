@@ -1,0 +1,389 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.auth import AuthContext
+from app.bilibili import DownloadResult
+from app.config import Settings
+from app.embedder import Embedding
+from app.errors import InsufficientScope, TokenInvalid, UpstreamError
+from app.main import create_app
+from app.playlist import dump_playlist, parse_playlist
+
+
+class FakeVerifier:
+    def __init__(self, _settings: Settings) -> None:
+        pass
+
+    def verify(self, token: str) -> AuthContext:
+        if token == "expired":
+            raise TokenInvalid("expired")
+        if token == "noscope":
+            raise InsufficientScope("play_sequence_override", ["api"])
+        if token != "good":
+            raise TokenInvalid("bad token")
+        return AuthContext(
+            subject="winsrewu",
+            scope=("play_sequence_override",),
+            claims={},
+            token_id="jti",
+            session_id="sid",
+        )
+
+
+class FakeAudio:
+    url = "https://example.invalid/audio"
+    headers = {}
+    mime_type = "audio/mp4"
+    bandwidth = 1
+    duration_seconds = 100.0
+    kind = "dash"
+
+
+class FakeBilibili:
+    def __init__(self, _settings: Settings) -> None:
+        self.calls = []
+
+    def resolve(self, target):  # type: ignore[no-untyped-def]
+        self.calls.append(target.value)
+        if target.value == "BBV1AA411p7zs":
+            raise UpstreamError("simulated upstream failure")
+        return FakeAudio()
+
+    def download(self, source, destination: Path, *, force_full: bool = False):  # type: ignore[no-untyped-def]
+        destination.write_bytes(b"fake audio")
+        return DownloadResult(
+            bytes_written=10, partial=False, total_bytes=10, requested_bytes=None
+        )
+
+    def close(self) -> None:
+        pass
+
+
+class FakeEmbedder:
+    def __init__(self, _settings: Settings) -> None:
+        pass
+
+    def embed_wav(self, path: Path) -> Embedding:
+        assert path.exists()
+        return Embedding(vector=[0.25] * 960, dim=960, model="mn10_as")
+
+
+def make_settings(
+    tmp_path: Path,
+    *,
+    strict: bool = False,
+    max_duration_seconds: int = 900,
+    dev_mode: bool = False,
+) -> Settings:
+    catalog = tmp_path / "catalog.v2.json"
+    playlist = parse_playlist(
+        {
+            "format": "jawbts.music-playlist",
+            "version": 2,
+            "tracks": [
+                {
+                    "id": "BBV16y4y127Dz",
+                    "provider": "bilibili",
+                    "video_id": "BV16y4y127Dz",
+                    "page": 1,
+                    "title": "t",
+                },
+                {
+                    "id": "BBV1AA411p7zs",
+                    "provider": "bilibili",
+                    "video_id": "BV1AA411p7zs",
+                    "page": 1,
+                    "title": "t2",
+                },
+            ],
+        }
+    )
+    dump_playlist(playlist, catalog, generated_at="2026-10-29T00:00:00Z")
+    return Settings(
+        catalog_path=catalog,
+        catalog_strict=strict,
+        jwks_url="https://api.jawbts.org/.well-known/jwks.json",
+        allow_insecure_jwks=False,
+        max_duration_seconds=max_duration_seconds,
+        dev_mode=dev_mode,
+    )
+
+
+def make_client(tmp_path: Path, *, strict: bool = False) -> TestClient:
+    app = create_app(
+        settings=make_settings(tmp_path, strict=strict),
+        verifier_factory=FakeVerifier,
+        embedder_factory=FakeEmbedder,
+        bilibili_factory=FakeBilibili,
+    )
+    return TestClient(app)
+
+
+@pytest.fixture()
+def client(tmp_path: Path) -> TestClient:
+    import app.main as main_module
+
+    original = main_module.decode_to_wav
+
+    def fake_decode(_source, destination, **_kwargs):  # type: ignore[no-untyped-def]
+        import wave
+
+        with wave.open(str(destination), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(32000)
+            handle.writeframes(b"\x00\x00" * 32000)
+
+    main_module.decode_to_wav = fake_decode  # type: ignore[assignment]
+    with make_client(tmp_path) as test_client:
+        yield test_client
+    main_module.decode_to_wav = original
+
+
+def test_requires_bearer(client: TestClient) -> None:
+    response = client.post("/v1/embed", json={"internal_id": "BBV16y4y127Dz"})
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_rejects_bad_token(client: TestClient) -> None:
+    response = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV16y4y127Dz"},
+        headers={"Authorization": "Bearer nope"},
+    )
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "token_invalid"
+
+
+def test_rejects_missing_scope(client: TestClient) -> None:
+    response = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV16y4y127Dz"},
+        headers={"Authorization": "Bearer noscope"},
+    )
+    assert response.status_code == 403
+    body = response.json()["error"]
+    assert body["code"] == "insufficient_scope"
+    assert body["required"] == "play_sequence_override"
+
+
+def test_rejects_unknown_fields(client: TestClient) -> None:
+    response = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV16y4y127Dz", "extra": True},
+        headers={"Authorization": "Bearer good"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_rejects_malformed_id(client: TestClient) -> None:
+    response = client.post(
+        "/v1/embed",
+        json={"internal_id": "not-an-id"},
+        headers={"Authorization": "Bearer good"},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_returns_embedding(client: TestClient) -> None:
+    response = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV16y4y127Dz"},
+        headers={"Authorization": "Bearer good"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["internal_id"] == "BBV16y4y127Dz"
+    assert body["model"] == "mn10_as"
+    assert body["dim"] == 960
+    assert len(body["embedding"]) == 960
+    assert body["embedding"][0] == 0.25
+    assert response.headers["x-embedding-model"] == "mn10_as"
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_upstream_failure_is_502(client: TestClient) -> None:
+    response = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV1AA411p7zs"},
+        headers={"Authorization": "Bearer good"},
+    )
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_error"
+
+
+def test_strict_catalog_rejects_unknown(tmp_path: Path) -> None:
+    app = create_app(
+        settings=make_settings(tmp_path, strict=True),
+        verifier_factory=FakeVerifier,
+        embedder_factory=FakeEmbedder,
+        bilibili_factory=FakeBilibili,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/embed",
+            json={"internal_id": "BBV1114y127ih"},
+            headers={"Authorization": "Bearer good"},
+        )
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "unknown_internal_id"
+
+
+def test_only_one_public_route(client: TestClient) -> None:
+    paths = {
+        route.path
+        for route in client.app.routes  # type: ignore[attr-defined]
+        if getattr(route, "path", "").startswith("/")
+    }
+    assert paths == {"/v1/embed"}
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+    assert client.get("/").status_code == 404
+
+
+def test_body_limit(client: TestClient) -> None:
+    response = client.post(
+        "/v1/embed",
+        content=b"x" * 20000,
+        headers={
+            "Authorization": "Bearer good",
+            "Content-Type": "application/json",
+            "Content-Length": "20000",
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+class PartialAudio(FakeAudio):
+    duration_seconds = 242.0
+
+
+class PartialBilibili(FakeBilibili):
+    def __init__(self, _settings: Settings) -> None:
+        super().__init__(_settings)
+        self.downloads: list[bool] = []
+
+    def resolve(self, target):  # type: ignore[no-untyped-def]
+        return PartialAudio()
+
+    def download(self, source, destination: Path, *, force_full: bool = False):  # type: ignore[no-untyped-def]
+        self.downloads.append(force_full)
+        destination.write_bytes(b"fake audio")
+        if force_full:
+            return DownloadResult(
+                bytes_written=9999, partial=False, total_bytes=9999, requested_bytes=None
+            )
+        return DownloadResult(
+            bytes_written=1234, partial=True, total_bytes=9999, requested_bytes=2000
+        )
+
+
+def _write_wav(path: Path, seconds: float) -> None:
+    import wave
+
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(32000)
+        handle.writeframes(b"\x00\x00" * int(32000 * seconds))
+
+
+def test_partial_download_headers(tmp_path: Path) -> None:
+    import app.main as main_module
+
+    original = main_module.decode_to_wav
+    main_module.decode_to_wav = lambda _s, d, **k: _write_wav(Path(d), 60.0)  # type: ignore[assignment]
+    app = create_app(
+        settings=make_settings(tmp_path, max_duration_seconds=60),
+        verifier_factory=FakeVerifier,
+        embedder_factory=FakeEmbedder,
+        bilibili_factory=PartialBilibili,
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/embed",
+                json={"internal_id": "BBV16y4y127Dz"},
+                headers={"Authorization": "Bearer good"},
+            )
+    finally:
+        main_module.decode_to_wav = original
+    assert response.status_code == 200, response.text
+    assert response.headers["x-audio-partial"] == "true"
+    assert response.headers["x-audio-bytes"] == "1234"
+    assert response.headers["x-audio-duration"] == "60.0"
+
+
+def test_short_partial_retries_full(tmp_path: Path) -> None:
+    import app.main as main_module
+
+    calls = {"n": 0}
+
+    def decoder(_source, destination, **_kwargs):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        _write_wav(Path(destination), 60.0 if calls["n"] > 1 else 1.0)
+
+    original = main_module.decode_to_wav
+    main_module.decode_to_wav = decoder  # type: ignore[assignment]
+    bilibili = PartialBilibili(make_settings(tmp_path))
+    app = create_app(
+        settings=make_settings(tmp_path, max_duration_seconds=60),
+        verifier_factory=FakeVerifier,
+        embedder_factory=FakeEmbedder,
+        bilibili_factory=lambda _settings: bilibili,
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/embed",
+                json={"internal_id": "BBV16y4y127Dz"},
+                headers={"Authorization": "Bearer good"},
+            )
+    finally:
+        main_module.decode_to_wav = original
+    assert response.status_code == 200, response.text
+    assert bilibili.downloads == [False, True]
+    assert response.headers["x-audio-partial"] == "false"
+
+
+def test_dev_mode_bypasses_auth(tmp_path: Path) -> None:
+    import app.main as main_module
+
+    original = main_module.decode_to_wav
+
+    def fake_decode(_source, destination, **_kwargs):  # type: ignore[no-untyped-def]
+        import wave
+
+        with wave.open(str(destination), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(32000)
+            handle.writeframes(b"\x00\x00" * 32000)
+
+    main_module.decode_to_wav = fake_decode  # type: ignore[assignment]
+    app = create_app(
+        settings=make_settings(tmp_path, dev_mode=True),
+        verifier_factory=FakeVerifier,
+        embedder_factory=FakeEmbedder,
+        bilibili_factory=FakeBilibili,
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/embed", json={"internal_id": "BBV16y4y127Dz"}
+            )
+    finally:
+        main_module.decode_to_wav = original
+    assert response.status_code == 200, response.text
+    assert response.headers["x-dev-mode"] == "true"
+    assert response.json()["dim"] == 960

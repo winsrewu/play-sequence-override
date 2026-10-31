@@ -1,0 +1,36 @@
+services:
+  embed:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: jawbts-embed:local
+    container_name: jawbts-embed
+    restart: unless-stopped
+    # Bind to loopback; put a TLS reverse proxy in front for remote access.
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      JWKS_URL: ${JWKS_URL:-https://api.jawbts.org/.well-known/jwks.json}
+      JWT_ISSUER: ${JWT_ISSUER:-jawbts-api}
+      REQUIRED_SCOPE: ${REQUIRED_SCOPE:-play_sequence_override}
+      CATALOG_PATH: ${CATALOG_PATH:-/app/data/music.v2.json}
+      CATALOG_STRICT: ${CATALOG_STRICT:-false}
+      # Local development only: bypasses bearer/JWKS verification.
+      DEV_MODE: ${DEV_MODE:-false}
+      MODEL_PATH: ${MODEL_PATH:-/app/assets/mn10_as_mAP_471.pt}
+      EFFICIENTAT_PATH: ${EFFICIENTAT_PATH:-/app/vendor/EfficientAT}
+      MAX_DURATION_SECONDS: ${MAX_DURATION_SECONDS:-900}
+      MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-134217728}
+      TORCH_THREADS: ${TORCH_THREADS:-4}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256

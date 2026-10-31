@@ -1,0 +1,68 @@
+{
+  "manifest_version": 3,
+  "name": "Jawbts Play Sequence Override",
+  "version": "0.3.4",
+  "description": "OAuth2-connected Bilibili playback that picks the next track from a Jawbts audio-embedding playlist.",
+  "minimum_chrome_version": "109",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "identity",
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.jawbts.org/*",
+    "https://www.bilibili.com/*",
+    "https://api.bilibili.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Jawbts Play Sequence Override",
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "src/options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.bilibili.com/*"
+      ],
+      "js": [
+        "src/disable-bili-auto-next.js"
+      ],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://www.bilibili.com/video/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

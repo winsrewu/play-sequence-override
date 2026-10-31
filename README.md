@@ -89,6 +89,17 @@ npm run check
 npm test
 ```
 
+## Privacy
+
+The extension keeps its session, library and playback history in IndexedDB on
+your device; the embedding service is stateless. The full policy is in
+[PRIVACY.md](PRIVACY.md) ([中文](PRIVACY.zh-CN.md)).
+
+The embedder is optional. If you do not agree with sending audio to a shared
+instance, deploy your own with the steps in [Deploy](#deploy) and set its URL
+in **Settings & allowlist** — the extension only contacts Bilibili and the API
+you configure.
+
 ## Versioning
 
 `VERSION` at the repository root is the single source of truth. The plugin

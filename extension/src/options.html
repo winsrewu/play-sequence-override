@@ -35,6 +35,22 @@
       </section>
 
       <section>
+        <h2>Cross-border data transfer</h2>
+        <p class="muted">
+          The URLs above are remote services. Using them sends request data —
+          your IP address, the video id and your token — outside your country.
+          Tick the box to consent; you can revoke it at any time. Without
+          consent the extension will not sign in or fetch vectors
+          automatically, and you can still import vectors from files.
+        </p>
+        <label>
+          <input id="transfer-consent" type="checkbox" />
+          I consent to sending request data to the configured remote services.
+        </label>
+        <p id="transfer-consent-status" class="muted"></p>
+      </section>
+
+      <section>
         <h2>Playback</h2>
         <label>
           Target similarity (%)

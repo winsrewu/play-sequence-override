@@ -65,6 +65,11 @@ function renderPrefetchState(state, missingCount, catalogCount, embeddedCount) {
   const progress = $('prefetch-progress')
   const label = $('prefetch-label')
   const missing = Number(missingCount) || 0
+  if (state?.waitingConsent) {
+    progress.classList.add('hidden')
+    label.textContent = 'Consent required in Settings & allowlist before fetching vectors remotely.'
+    return
+  }
   if (!state && missing === 0) {
     progress.classList.add('hidden')
     $('prefetch-auth').classList.add('hidden')
@@ -154,7 +159,11 @@ function render(status, tab = null) {
     status.catalogCount,
     status.embeddedCount,
   )
-  $('vector-status').textContent = status.catalogMissing
+  const consent = status.consent || null
+  const consentNeeded = Boolean(consent?.required && !consent.granted)
+  $('vector-status').textContent = consentNeeded
+    ? 'Cross-border transfer consent required in Settings & allowlist; remote calls are disabled.'
+    : status.catalogMissing
     ? 'No catalog yet — use Import JSON to load a playlist.'
     : status.vectorError
       ? `Embedding error: ${status.vectorError}`

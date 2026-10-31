@@ -56,10 +56,33 @@ function fillForm(config) {
   $('dev-mode').checked = Boolean(config.devMode)
 }
 
+async function refreshConsent() {
+  const checkbox = $('transfer-consent')
+  const label = $('transfer-consent-status')
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'consent-status' })
+    const consent = response?.consent
+    if (!consent || !consent.required) {
+      checkbox.checked = false
+      checkbox.disabled = true
+      label.textContent = 'All configured services are local; no cross-border transfer is involved.'
+      return
+    }
+    checkbox.disabled = false
+    checkbox.checked = Boolean(consent.granted)
+    label.textContent = consent.granted
+      ? `Granted for ${consent.origins.join(', ')}${consent.at ? ` on ${consent.at}` : ''}.`
+      : `Not granted. Remote services: ${consent.origins.join(', ')}.`
+  } catch (error) {
+    label.textContent = error?.message || String(error)
+  }
+}
+
 async function load() {
   const config = await getConfig()
   fillForm(config)
   renderMeta(config)
+  await refreshConsent()
   try {
     chrome.runtime
       .sendMessage({ type: 'ensure-prefetch' })
@@ -92,11 +115,22 @@ $('dev-mode').addEventListener('change', async (event) => {
   }
 })
 
+$('transfer-consent').addEventListener('change', async (event) => {
+  try {
+    await chrome.runtime.sendMessage({ type: 'set-consent', value: event.target.checked })
+  } catch (error) {
+    $('transfer-consent-status').textContent = error?.message || String(error)
+  } finally {
+    await refreshConsent()
+  }
+})
+
 $('save').addEventListener('click', async () => {
   try {
     const config = await setConfig(readForm())
     fillForm(config)
     renderMeta(config)
+    await refreshConsent()
     setStatus('Saved.', 'ok')
   } catch (error) {
     setStatus(error.message, 'bad')
@@ -108,6 +142,7 @@ $('reset').addEventListener('click', async () => {
     const config = await setConfig(DEFAULT_CONFIG)
     fillForm(config)
     renderMeta(config)
+    await refreshConsent()
     setStatus('Defaults restored.', 'ok')
   } catch (error) {
     setStatus(error.message, 'bad')

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jawbts Play Sequence Override",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "OAuth2-connected Bilibili playback that picks the next track from a Jawbts audio-embedding playlist.",
   "minimum_chrome_version": "109",
   "permissions": [

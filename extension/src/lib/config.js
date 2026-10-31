@@ -98,6 +98,28 @@ export function isLocalUrl(value) {
   }
 }
 
+// Origins that receive request data over the network (never the local one).
+export function remoteOrigins(config) {
+  const values = [config?.apiBaseUrl, config?.gatewayAuthorizeUrl, config?.embedApiUrl]
+  const origins = []
+  for (const value of values) {
+    if (typeof value !== 'string' || !value || isLocalUrl(value)) continue
+    try {
+      const origin = new URL(value).origin
+      if (!origins.includes(origin)) origins.push(origin)
+    } catch {
+    }
+  }
+  return origins
+}
+
+// A consent grant only covers the origins it was given for.
+export function consentCovers(stored, origins) {
+  if (!stored?.granted) return false
+  const scope = Array.isArray(stored.origins) ? stored.origins : []
+  return origins.every((origin) => scope.includes(origin))
+}
+
 export function buildAuthorizeUrl(config, redirectUri, state) {
   const url = new URL(config.gatewayAuthorizeUrl)
   url.searchParams.set('redirect_uri', redirectUri)

@@ -7,7 +7,7 @@ import {
   extensionId,
   redirectUri,
 } from './lib/auth.js'
-import { normalizeConfig } from './lib/config.js'
+import { consentCovers, normalizeConfig, remoteOrigins } from './lib/config.js'
 import {
   DERIVED_VERSION,
   computeProjectionModel,
@@ -258,6 +258,28 @@ function tuningFromConfig(config) {
   }
 }
 
+async function consentStatus(config = null) {
+  const current = config || (await getConfig())
+  const origins = remoteOrigins(current)
+  if (origins.length === 0) return { required: false, granted: true, origins: [], at: null }
+  const stored = await store.getConsent()
+  return {
+    required: true,
+    granted: consentCovers(stored, origins),
+    origins,
+    at: stored?.at || null,
+  }
+}
+
+async function requireRemoteConsent() {
+  const consent = await consentStatus()
+  if (consent.required && !consent.granted) {
+    throw new Error(
+      'Cross-border transfer consent is required in Settings & allowlist before the extension contacts a remote service.',
+    )
+  }
+}
+
 function invalidateRecommender() {
   recommenderCache = null
   projectionCache = null
@@ -324,6 +346,7 @@ async function status() {
 
   const catalogCount = catalog.tracks.length
   const cachedCount = Math.max(0, catalogCount - missingCount)
+  const consent = await consentStatus(config)
   if (
     prefetchState.total !== catalogCount ||
     prefetchState.done < cachedCount ||
@@ -339,6 +362,10 @@ async function status() {
       updatedAt: Date.now(),
     }
   }
+  prefetchState = {
+    ...prefetchState,
+    waitingConsent: missingCount > 0 && consent.required && !consent.granted,
+  }
 
   const byId = new Map(catalog.tracks.map((track) => [track.id, track]))
   const owner = await ownerTabEntry()
@@ -350,6 +377,7 @@ async function status() {
     embeddedCount,
     missingCount,
     vectorError,
+    consent,
     current: trackMeta(byId.get(currentId)),
     history: history.slice(0, 10).map((id) => trackMeta(byId.get(id))).filter(Boolean),
     targetSimilarity: config.targetSimilarity,
@@ -684,6 +712,21 @@ async function autoPrefetchMissing() {
       return { done: 0, total: 0 }
     }
 
+    const consent = await consentStatus()
+    if (missing.length > 0 && consent.required && !consent.granted) {
+      prefetchState = {
+        running: false,
+        waitingAuth: false,
+        waitingConsent: true,
+        complete: false,
+        done: cached,
+        total,
+        remaining: missing.length,
+        updatedAt: Date.now(),
+      }
+      return { done: cached, total, waitingConsent: true }
+    }
+
     if (missing.length === 0) {
       prefetchState = {
         running: false,
@@ -872,6 +915,7 @@ async function autoPrefetchMissing() {
 
 async function prefetch(onProgress) {
   await initialize()
+  await requireRemoteConsent()
   if (autoPrefetchPromise) {
     await autoPrefetchPromise.catch(() => {})
   }
@@ -1008,9 +1052,26 @@ async function handleMessage(message, sender) {
     case 'status':
       return status()
     case 'connect':
+      await requireRemoteConsent()
       await authConnect()
       autoPrefetchMissing().catch(() => {})
       return status()
+    case 'consent-status':
+      return { ok: true, consent: await consentStatus() }
+    case 'set-consent': {
+      const currentConfig = await getConfig()
+      if (message.value) {
+        await store.setConsent({
+          granted: true,
+          at: new Date().toISOString(),
+          origins: remoteOrigins(currentConfig),
+        })
+      } else {
+        await store.clearConsent()
+      }
+      broadcast({ type: 'data-changed', kind: 'consent' })
+      return { ok: true, consent: await consentStatus(currentConfig) }
+    }
     case 'disconnect':
       await authDisconnect()
       return status()

@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { buildAuthorizeUrl, DEFAULT_CONFIG, normalizeConfig } from '../src/lib/config.js'
+import {
+  buildAuthorizeUrl,
+  consentCovers,
+  DEFAULT_CONFIG,
+  normalizeConfig,
+  remoteOrigins,
+} from '../src/lib/config.js'
 
 test('defaults are normalized', () => {
   const config = normalizeConfig(DEFAULT_CONFIG)
@@ -64,4 +70,29 @@ test('dev mode requires a localhost embedding URL', () => {
     () => normalizeConfig({ devMode: true, embedApiUrl: 'https://embed.jawbts.org/v1/embed' }),
     /localhost/,
   )
+})
+
+test('remote origins skip localhost and deduplicate', () => {
+  const config = normalizeConfig(DEFAULT_CONFIG)
+  assert.deepEqual(remoteOrigins(config), [
+    'https://api.jawbts.org',
+    'https://gateway.jawbts.org',
+    'https://embed.jawbts.org',
+  ])
+  const local = normalizeConfig({
+    apiBaseUrl: 'http://localhost:8000',
+    gatewayAuthorizeUrl: 'http://127.0.0.1:9000/authorize',
+    embedApiUrl: 'http://localhost:8000/v1/embed',
+  })
+  assert.deepEqual(remoteOrigins(local), [])
+})
+
+test('consent covers exactly the granted origins', () => {
+  const config = normalizeConfig(DEFAULT_CONFIG)
+  const origins = remoteOrigins(config)
+  assert.equal(consentCovers({ granted: true, origins }, origins), true)
+  assert.equal(consentCovers({ granted: true, origins: origins.slice(0, 2) }, origins), false)
+  assert.equal(consentCovers({ granted: false, origins }, origins), false)
+  assert.equal(consentCovers(null, origins), false)
+  assert.equal(consentCovers({ granted: true, origins }, []), true)
 })

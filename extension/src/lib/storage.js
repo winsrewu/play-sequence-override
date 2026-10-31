@@ -20,6 +20,7 @@ export const KEYS = Object.freeze({
   prefetchJob: 'prefetchJob',
   tabRegistry: 'tabRegistry',
   derived: 'derived',
+  consent: 'consent',
   migrated: 'migrated_v2',
 })
 
@@ -226,6 +227,28 @@ export async function getTabRegistry() {
 
 export async function setTabRegistry(tabs) {
   await kvSet(KEYS.tabRegistry, tabs)
+}
+
+// Consent to send request data to remote (non-local) services.
+export async function getConsent() {
+  await ensureMigrated()
+  const stored = await kvGet(KEYS.consent, null)
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return null
+  return {
+    granted: Boolean(stored.granted),
+    at: typeof stored.at === 'string' ? stored.at : null,
+    origins: Array.isArray(stored.origins)
+      ? stored.origins.filter((value) => typeof value === 'string')
+      : [],
+  }
+}
+
+export async function setConsent(consent) {
+  await kvSet(KEYS.consent, consent)
+}
+
+export async function clearConsent() {
+  await kvDelete(KEYS.consent)
 }
 
 // Style clusters and projection derived from the vectors and cached.

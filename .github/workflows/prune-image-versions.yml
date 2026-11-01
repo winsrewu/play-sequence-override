@@ -35,7 +35,7 @@ jobs:
           token: ${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
           package: ${{ github.event.repository.name }}
           # Tags, not version names: the official action matches digests here.
-          exclude-tags: '^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          exclude-tags: latest,main,*.*
           use-regex: true
           keep-n-tagged: ${{ inputs.keep || 5 }}
           delete-untagged: true

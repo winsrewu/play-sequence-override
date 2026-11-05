@@ -23,8 +23,9 @@ import {
   loadAllVectors,
   missingTrackIds,
 } from './lib/embeddings.js'
-import { parseEmbeddingText } from './lib/embedding-json.js'
+import { EMBEDDING_DIM, parseEmbeddingText } from './lib/embedding-json.js'
 import { FORMAT, VERSION, exportV2, parseAnyPlaylist, playlistSummary } from './lib/playlist.js'
+import { parseVectors, serializeVectors } from './lib/vector-json.js'
 import { forgetTab, isVideoTabUrl, ownerTab, ownerTabId, registerTab } from './lib/sequence.js'
 import * as store from './lib/storage.js'
 import { getConfig, setConfig } from './lib/storage.js'
@@ -1206,6 +1207,22 @@ async function handleMessage(message, sender) {
     }
     case 'export':
       return exportPlaylist()
+    case 'export-vectors': {
+      const { vectors } = await loadAllVectors()
+      const { text, count } = serializeVectors(vectors)
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      return { ok: true, text, count, filename: `jawbts-vectors-${stamp}.json` }
+    }
+    case 'import-vectors': {
+      const { vectors } = await loadAllVectors()
+      const existingDim = vectors.values().next().value?.length ?? null
+      const parsed = parseVectors(message.text, { dim: existingDim ?? EMBEDDING_DIM })
+      const count = await cacheEmbeddings(parsed.vectors)
+      invalidateCachedEmbeddings()
+      invalidateRecommender()
+      broadcast({ type: 'data-changed', kind: 'embeddings' })
+      return { ok: true, count, dim: parsed.dim }
+    }
     case 'prefetch': {
       const { ok, ...result } = await prefetch((progress) => {
         chrome.runtime.sendMessage({ type: 'prefetch-progress', ...progress }).catch(() => {})

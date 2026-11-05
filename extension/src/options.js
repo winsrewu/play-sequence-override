@@ -248,6 +248,48 @@ $('embedding-files').addEventListener('change', async (event) => {
   await importEmbeddingFiles(files)
 })
 
+function downloadText(text, filename) {
+  const blob = new Blob([text], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
+$('export-vectors').addEventListener('click', async (event) => {
+  const button = event.currentTarget
+  button.disabled = true
+  $('vector-transfer-status').textContent = 'Exporting…'
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'export-vectors' })
+    if (!response?.ok) throw new Error(response?.error?.message || 'Export failed')
+    downloadText(response.text, response.filename)
+    $('vector-transfer-status').textContent = `Exported ${response.count} vectors.`
+  } catch (error) {
+    $('vector-transfer-status').textContent = error?.message || String(error)
+  } finally {
+    button.disabled = false
+  }
+})
+
+$('import-vectors').addEventListener('change', async (event) => {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  $('vector-transfer-status').textContent = 'Importing…'
+  try {
+    const text = await file.text()
+    const response = await chrome.runtime.sendMessage({ type: 'import-vectors', text })
+    if (!response?.ok) throw new Error(response?.error?.message || 'Import failed')
+    $('vector-transfer-status').textContent =
+      `Imported ${response.count} vectors (${response.dim} dimensions).`
+  } catch (error) {
+    $('vector-transfer-status').textContent = error?.message || String(error)
+  }
+})
+
 $('request-permissions').addEventListener('click', async () => {
   try {
     const config = readForm()

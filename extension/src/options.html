@@ -112,6 +112,22 @@
       </section>
 
       <section>
+        <h2>Vector backup</h2>
+        <p class="muted">
+          Export every stored vector to a JSON file, or import a file produced by
+          Export. Importing updates matching ids and keeps the rest.
+        </p>
+        <div class="actions">
+          <button id="export-vectors" type="button">Export vectors</button>
+          <label class="file-button">
+            Import vectors
+            <input id="import-vectors" type="file" accept="application/json,.json" hidden />
+          </label>
+        </div>
+        <p id="vector-transfer-status" class="muted"></p>
+      </section>
+
+      <section>
         <h2>OAuth allowlist</h2>
         <p class="muted">
           jawbts-gateway only redirects to hosts in

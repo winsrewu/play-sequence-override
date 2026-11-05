@@ -203,7 +203,7 @@ async function ensureContent(tab) {
     if (
       tab?.id &&
       typeof tab.url === 'string' &&
-      tab.url.startsWith('https://www.bilibili.com/video/')
+      tab.url.startsWith('https://www.bilibili.com/')
     ) {
       await chrome.runtime.sendMessage({ type: 'ensure-content', tabId: tab.id })
     }

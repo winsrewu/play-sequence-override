@@ -49,7 +49,7 @@
     },
     {
       "matches": [
-        "https://www.bilibili.com/video/*"
+        "https://www.bilibili.com/*"
       ],
       "js": [
         "src/content.js"

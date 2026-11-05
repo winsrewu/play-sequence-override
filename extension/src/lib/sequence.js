@@ -1,8 +1,35 @@
 // One Bilibili video tab drives the sequence. The first detected tab keeps
 // ownership until it closes; the survivors then elect again in detection order.
 
+const BVID_PATTERN = /^BV[0-9A-Za-z]{10}$/
+
+// Festival and other player pages carry the bvid in the query string.
 export function isVideoTabUrl(url) {
-  return typeof url === 'string' && url.startsWith('https://www.bilibili.com/video/')
+  if (isVideoPageUrl(url)) return true
+  try {
+    const parsed = new URL(url)
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname === 'www.bilibili.com' &&
+      BVID_PATTERN.test(parsed.searchParams.get('bvid') || '')
+    )
+  } catch {
+    return false
+  }
+}
+
+// A page whose own path is the video player, where soft navigation works.
+export function isVideoPageUrl(url) {
+  try {
+    const parsed = new URL(url)
+    return (
+      parsed.protocol === 'https:' &&
+      parsed.hostname === 'www.bilibili.com' &&
+      /^\/video\/BV[0-9A-Za-z]{10}/.test(parsed.pathname)
+    )
+  } catch {
+    return false
+  }
 }
 
 export function registerTab(tabs, { tabId, id, url, title, at }) {

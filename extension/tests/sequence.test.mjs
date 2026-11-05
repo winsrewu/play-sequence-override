@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   forgetTab,
+  isVideoPageUrl,
   isVideoTabUrl,
   ownerTab,
   ownerTabId,
@@ -78,4 +79,17 @@ test('only video page urls count as detected tabs', () => {
   assert.equal(isVideoTabUrl('https://www.bilibili.com/video'), false)
   assert.equal(isVideoTabUrl('https://example.com/video/BV1'), false)
   assert.equal(isVideoTabUrl(null), false)
+})
+
+test('bvid query pages count as video tabs but not as soft-navigation pages', () => {
+  const festival = 'https://www.bilibili.com/festival/genshin2024?bvid=BV1HB421674n'
+  assert.equal(isVideoTabUrl(festival), true)
+  assert.equal(isVideoPageUrl(festival), false)
+  assert.equal(isVideoTabUrl(`${festival}&p=3`), true)
+  assert.equal(isVideoTabUrl('https://www.bilibili.com/festival/genshin2024'), false)
+  assert.equal(isVideoTabUrl('https://www.bilibili.com/blackboard/x?bvid=BV1HB421674n'), true)
+  assert.equal(isVideoTabUrl('https://www.bilibili.com/blackboard/x?bvid=BV1'), false)
+  assert.equal(isVideoTabUrl('https://evil.com/festival?bvid=BV1HB421674n'), false)
+  assert.equal(isVideoPageUrl('https://www.bilibili.com/video/BV1HB421674n?p=2'), true)
+  assert.equal(isVideoPageUrl('https://www.bilibili.com/video/BV1'), false)
 })

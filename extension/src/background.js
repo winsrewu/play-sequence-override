@@ -26,7 +26,7 @@ import {
 import { EMBEDDING_DIM, parseEmbeddingText } from './lib/embedding-json.js'
 import { FORMAT, VERSION, exportV2, parseAnyPlaylist, playlistSummary } from './lib/playlist.js'
 import { parseVectors, serializeVectors } from './lib/vector-json.js'
-import { forgetTab, isVideoTabUrl, ownerTab, ownerTabId, registerTab } from './lib/sequence.js'
+import { forgetTab, isVideoPageUrl, isVideoTabUrl, ownerTab, ownerTabId, registerTab } from './lib/sequence.js'
 import * as store from './lib/storage.js'
 import { getConfig, setConfig } from './lib/storage.js'
 
@@ -545,7 +545,10 @@ async function navigate(tabId, track, soft) {
   const url = trackUrl(track)
   if (tabId != null) {
     if (soft) {
-      if (await softNavigate(tabId, track)) return
+      // Soft navigation patches the video page's Vue player; festival and other
+      // player pages must be replaced with a real navigation.
+      const tab = await chrome.tabs.get(tabId).catch(() => null)
+      if (isVideoPageUrl(tab?.url) && (await softNavigate(tabId, track))) return
     }
     try {
       await chrome.tabs.sendMessage(tabId, { type: 'navigate', url, soft })

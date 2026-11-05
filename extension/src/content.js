@@ -1,6 +1,6 @@
 // Bilibili watcher. Site auto-next is disabled; real ends enter the sequence and soft navigation uses RELOAD_VIDEO.
 (() => {
-  const SCRIPT_VERSION = 4
+  const SCRIPT_VERSION = 5
   if (Number(window.__jawbtsPlaySequenceVersion) >= SCRIPT_VERSION) return
   window.__jawbtsPlaySequenceVersion = SCRIPT_VERSION
   window.__jawbtsPlaySequenceLoaded = true
@@ -27,12 +27,15 @@
       return null
     }
     const match = VIDEO_RE.exec(parsed.pathname)
-    if (!match) return null
+    // Festival and other player pages put the bvid in the query string.
+    const bvid = match ? match[1] : parsed.searchParams.get('bvid') || ''
+    if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) return null
     const page = Math.max(1, Number(parsed.searchParams.get('p') || '1') || 1)
     return {
-      id: `B${match[1]}${page > 1 ? `_${page}` : ''}`,
-      bvid: match[1],
+      id: `B${bvid}${page > 1 ? `_${page}` : ''}`,
+      bvid,
       page,
+      path: Boolean(match),
       url: parsed.toString(),
     }
   }
@@ -40,6 +43,8 @@
   function report(force = false) {
     const current = parseId()
     if (!current) return
+    // A query-string bvid only counts once the page actually hosts a player.
+    if (!current.path && !document.querySelector('video')) return
     if (!force && current.id === lastReported) return
     lastReported = current.id
     try {
@@ -114,7 +119,8 @@
     }
     if (target.id === parseId()?.id) return
 
-    if (!soft) {
+    // Soft navigation only works on the video page's own SPA route.
+    if (!soft || !VIDEO_RE.test(location.pathname)) {
       hardNavigate(target.url)
       return
     }

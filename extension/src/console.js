@@ -15,6 +15,7 @@ const PREVIEWABLE = new Set([
   'auto',
   'logout',
   'consent',
+  'remove-unavailable',
 ])
 
 const history = []

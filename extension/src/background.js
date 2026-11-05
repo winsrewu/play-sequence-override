@@ -15,7 +15,7 @@ import {
   projectPoint,
   shouldReuseDerived,
 } from './lib/derived.js'
-import { embedTrack } from './lib/embed-api.js'
+import { embedTrack, embedTrackBatch } from './lib/embed-api.js'
 import {
   cacheEmbedding,
   cacheEmbeddings,
@@ -33,6 +33,7 @@ import {
   playlistSummary,
 } from './lib/playlist.js'
 import { parseCommand } from './lib/command-parse.js'
+import { estimateEta } from './lib/eta.js'
 import { multiPageVideos, trackText } from './lib/console-format.js'
 import { IMPORT_SOURCES, resolveImportTracks } from './lib/import-sources.js'
 import { parseVectors, serializeVectors } from './lib/vector-json.js'
@@ -49,18 +50,25 @@ let projectionCache = null
 let lastDecision = null
 let styleCache = null
 let lastAutoAdvance = null
-let autoPrefetchPromise = null
 let prefetchState = {
   running: false,
   waitingAuth: false,
   complete: false,
+  startedAt: null,
+  startDone: 0,
+  etaSeconds: null,
   done: 0,
   total: 0,
   remaining: 0,
   updatedAt: null,
 }
-const AUTO_PREFETCH_CHUNK = 20
-const AUTO_PREFETCH_ALARM = 'jawbts-auto-prefetch'
+const EMBED_BATCH_SIZE = 10
+const EMBED_POLL_START_MS = 5000
+const EMBED_POLL_MAX_MS = 20000
+const EMBED_ITEM_DEADLINE_MS = 15 * 60_000
+const MANUAL_PREFETCH_ALARM = 'jawbts-manual-prefetch'
+const AUTO_FETCH_COOLDOWN_MS = 60_000
+let lastAutoFetchAt = 0
 
 function broadcast(message) {
   try {
@@ -347,7 +355,6 @@ async function projectionPoints(recommender) {
 
 async function status() {
   await initialize()
-  autoPrefetchMissing().catch(() => {})
   const [config, catalog, session, currentId, history, plays] = await Promise.all([
     getConfig(),
     ensureCatalog(),
@@ -372,6 +379,7 @@ async function status() {
   const catalogCount = catalog.tracks.length
   const cachedCount = Math.max(0, catalogCount - missingCount)
   const consent = await consentStatus(config)
+  if (missingCount > 0) startVectorFetch().catch(() => {})
   if (
     prefetchState.total !== catalogCount ||
     prefetchState.done < cachedCount ||
@@ -403,6 +411,13 @@ async function status() {
     missingCount,
     vectorError,
     consent,
+    unavailable: Object.entries(await activeUnavailable()).map(([id, entry]) => ({
+      id,
+      title: entry.title || trackMeta(byId.get(id))?.title || '',
+      code: entry.code,
+      message: entry.message,
+      at: entry.at,
+    })),
     current: trackMeta(byId.get(currentId)),
     history: history.slice(0, 10).map((id) => trackMeta(byId.get(id))).filter(Boolean),
     targetSimilarity: config.targetSimilarity,
@@ -415,7 +430,16 @@ async function status() {
     gatewayAllowlistHost: new URL(redirectUri()).hostname,
     summary: playlistSummary(catalog),
     sessionPlays: plays,
-    prefetch: prefetchState,
+    prefetch: {
+      ...prefetchState,
+      etaSeconds: prefetchState.running
+        ? estimateEta(
+            prefetchState.done - (prefetchState.startDone || 0),
+            prefetchState.remaining,
+            prefetchState.startedAt,
+          )
+        : null,
+    },
     owner: owner
       ? { tabId: owner.tabId, id: owner.id, title: owner.title, url: owner.url }
       : null,
@@ -711,263 +735,228 @@ async function launch({ targetSimilarity = null } = {}) {
   return { ok: true, next: trackMeta(track) }
 }
 
-async function autoPrefetchMissing() {
-  if (autoPrefetchPromise) return autoPrefetchPromise
-  autoPrefetchPromise = (async () => {
-    await initialize()
-    const [catalog, { vectors }] = await Promise.all([ensureCatalog(), getRecommender(true)])
-    const missing = missingTrackIds(catalog.tracks, vectors)
-    const total = new Set(catalog.tracks.map((track) => track.id)).size
-    const cached = Math.max(0, total - missing.length)
-
-    // Nothing to fetch (and no catalog yet): stay quiet instead of reporting a
-    // completed prefetch on every status call.
-    if (total === 0) {
-      prefetchState = {
-        running: false,
-        waitingAuth: false,
-        complete: true,
-        done: 0,
-        total: 0,
-        remaining: 0,
-        updatedAt: Date.now(),
-      }
-      await store.clearPrefetchJob().catch(() => {})
-      try {
-        chrome.alarms?.clear(AUTO_PREFETCH_ALARM)
-      } catch {
-      }
-      return { done: 0, total: 0 }
+async function resumeManualPrefetch() {
+  if (manualPrefetchPromise) return
+  const job = await store.getPrefetchJob().catch(() => null)
+  if (!job || job.kind !== 'manual') {
+    try {
+      chrome.alarms?.clear(MANUAL_PREFETCH_ALARM)
+    } catch {
     }
+    return
+  }
+  prefetch().catch((error) => console.error('manual prefetch resume failed', error))
+}
 
-    const consent = await consentStatus()
-    if (missing.length > 0 && consent.required && !consent.granted) {
-      prefetchState = {
-        running: false,
-        waitingAuth: false,
-        waitingConsent: true,
-        complete: false,
-        done: cached,
-        total,
-        remaining: missing.length,
-        updatedAt: Date.now(),
-      }
-      return { done: cached, total, waitingConsent: true }
-    }
+let manualPrefetchPromise = null
 
-    if (missing.length === 0) {
-      prefetchState = {
-        running: false,
-        waitingAuth: false,
-        complete: true,
-        done: total,
-        total,
-        remaining: 0,
-        updatedAt: Date.now(),
-      }
-      await store.clearPrefetchJob()
-      try {
-        chrome.alarms?.clear(AUTO_PREFETCH_ALARM)
-      } catch {
-      }
-      broadcast({ type: 'prefetch-progress', automatic: true, complete: true, done: total, total })
-      return { done: total, total }
-    }
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
-    const auth = await authStatus()
-    if (!auth.devMode && !auth.connected) {
-      prefetchState = {
-        running: false,
-        waitingAuth: true,
-        complete: false,
-        done: cached,
-        total,
-        remaining: missing.length,
-        updatedAt: Date.now(),
-      }
-      broadcast({
-        type: 'prefetch-progress',
-        automatic: true,
-        waitingAuth: true,
-        done: cached,
-        total,
-        remaining: missing.length,
-      })
-      return { waitingAuth: true, done: cached, total }
-    }
+const UNAVAILABLE_TTL_MS = 24 * 3600 * 1000
 
-    let job = await store.getPrefetchJob()
-    if (!job || job.total !== total) {
-      job = { total, done: cached, failed: 0, startedAt: Date.now() }
-    } else {
-      job.total = total
-      job.done = cached
+async function activeUnavailable() {
+  const entries = await store.getUnavailableVectors()
+  const now = Date.now()
+  let changed = false
+  for (const [id, entry] of Object.entries(entries)) {
+    if (now - entry.at >= UNAVAILABLE_TTL_MS) {
+      delete entries[id]
+      changed = true
     }
+  }
+  if (changed) await store.setUnavailableVectors(entries).catch(() => {})
+  return entries
+}
+
+async function startVectorFetch() {
+  if (manualPrefetchPromise) return
+  if (Date.now() - lastAutoFetchAt < AUTO_FETCH_COOLDOWN_MS) return
+  const [catalog, { vectors }] = await Promise.all([ensureCatalog(), getRecommender(true)])
+  const unavailable = await activeUnavailable()
+  const missing = missingTrackIds(catalog.tracks, vectors).filter((id) => !(id in unavailable))
+  if (missing.length === 0) return
+  const auth = await authStatus()
+  if (!auth.devMode && !auth.connected) return
+  lastAutoFetchAt = Date.now()
+  prefetch().catch(() => {})
+}
+
+function prefetch(onProgress) {
+  if (manualPrefetchPromise) return manualPrefetchPromise
+  manualPrefetchPromise = runPrefetch(onProgress).finally(() => {
+    manualPrefetchPromise = null
+  })
+  return manualPrefetchPromise
+}
+
+async function runPrefetch(onProgress) {
+  await initialize()
+  await requireRemoteConsent()
+  const emit =
+    onProgress ||
+    ((progress) => broadcast({ type: 'prefetch-progress', ...progress }))
+  const [catalog, { vectors }] = await Promise.all([ensureCatalog(), getRecommender(true)])
+  const unavailable = await activeUnavailable()
+  const unavailableCount = Object.keys(unavailable).length
+  const titles = new Map(catalog.tracks.map((track) => [track.id, track.title]))
+  const missingAll = missingTrackIds(catalog.tracks, vectors)
+  const missing = missingAll.filter((id) => !(id in unavailable))
+  const total = new Set(catalog.tracks.map((track) => track.id)).size
+  let done = Math.max(0, total - missingAll.length)
+  const baselineDone = done
+  const startedAt = Date.now()
+  try {
+    chrome.alarms?.create(MANUAL_PREFETCH_ALARM, { periodInMinutes: 0.5 })
+  } catch {
+  }
+  let failed = 0
+  const persisted = { kind: 'manual', total, done, failed, startedAt }
+  await store.setPrefetchJob(persisted).catch(() => {})
+  const failures = []
+
+  // Keep a window of 10 ids in flight and refill it as vectors arrive, so the
+  // service queue stays full instead of draining between batches.
+  const queue = [...missing]
+  const batchWindow = new Map()
+  let wait = EMBED_POLL_START_MS
+  while (queue.length > 0 || batchWindow.size > 0) {
+    let refilled = false
+    while (batchWindow.size < EMBED_BATCH_SIZE && queue.length > 0) {
+      batchWindow.set(queue.shift(), Date.now())
+      refilled = true
+    }
+    if (batchWindow.size === 0) break
+    const ids = [...batchWindow.keys()]
+    emit({
+      id: ids[0],
+      done,
+      total,
+      failed,
+      etaSeconds: estimateEta(done - baselineDone, total - done, startedAt),
+    })
+    let result
+    try {
+      result = await embedTrackBatch(ids)
+    } catch (error) {
+      if (error?.code === 'token_expired' || error?.name === 'AuthError') throw error
+      const message = error?.message || String(error)
+      for (const id of ids) {
+        failures.push({ id, message })
+        failed += 1
+        batchWindow.delete(id)
+      }
+      continue
+    }
+    if (result.unsupported) {
+      for (const id of ids) {
+        try {
+          const { vector } = await embedTrack(id)
+          await cacheEmbedding(id, vector)
+          await store.clearVectorUnavailable(id)
+          done += 1
+        } catch (error) {
+          if (error?.code === 'token_expired' || error?.name === 'AuthError') throw error
+          if (error?.code === 'video_unavailable') {
+            await store.markVectorUnavailable(id, {
+              code: error.code,
+              message: error?.message || '',
+              title: titles.get(id) || '',
+            })
+          }
+          failures.push({ id, message: error?.message || String(error) })
+          failed += 1
+        }
+        batchWindow.delete(id)
+      }
+      continue
+    }
+    for (const [id, item] of result.ready) {
+      if (!batchWindow.has(id)) continue
+      await cacheEmbedding(id, item.vector)
+      await store.clearVectorUnavailable(id)
+      batchWindow.delete(id)
+      done += 1
+    }
+    for (const [id, failure] of result.failures) {
+      if (!batchWindow.has(id)) continue
+      if (failure.code === 'video_unavailable') {
+        await store.markVectorUnavailable(id, {
+          code: failure.code,
+          message: failure.message,
+          title: titles.get(id) || '',
+        })
+      }
+      failures.push({ id, message: failure.message, code: failure.code })
+      failed += 1
+      batchWindow.delete(id)
+    }
+    if (result.pending.length === 0) {
+      for (const id of [...batchWindow.keys()]) {
+        failures.push({ id, message: 'the service returned no status' })
+        failed += 1
+        batchWindow.delete(id)
+      }
+    }
+    const now = Date.now()
+    for (const [id, queuedAt] of [...batchWindow.entries()]) {
+      if (now - queuedAt > EMBED_ITEM_DEADLINE_MS) {
+        failures.push({ id, message: 'timed out waiting for the embedding' })
+        failed += 1
+        batchWindow.delete(id)
+      }
+    }
+    persisted.done = done
+    persisted.failed = failed
+    await store.setPrefetchJob(persisted).catch(() => {})
+    const etaSeconds = estimateEta(done - baselineDone, total - done, startedAt)
     prefetchState = {
       running: true,
       waitingAuth: false,
       complete: false,
-      done: cached,
+      done,
       total,
-      remaining: missing.length,
+      remaining: Math.max(0, total - done),
+      startedAt,
+      startDone: baselineDone,
+      etaSeconds,
+      failed,
+      unavailable: unavailableCount,
       updatedAt: Date.now(),
     }
-    const pending = new Set(missing)
-    const failedIds = new Set()
-    let processed = 0
-    const failures = []
-    while (processed < AUTO_PREFETCH_CHUNK && pending.size > 0) {
-      const id = pending.values().next().value
-      pending.delete(id)
-      processed += 1
-      broadcast({
-        type: 'prefetch-progress',
-        automatic: true,
-        id,
-        done: job.done,
-        total,
-        remaining: pending.size + failedIds.size,
-      })
-      try {
-        const { vector } = await embedTrack(id)
-        await cacheEmbedding(id, vector)
-        job.done = Math.min(total, job.done + 1)
-      } catch (error) {
-        if (error?.code === 'token_expired' || error?.name === 'AuthError') {
-          await store.setPrefetchJob({ ...job, updatedAt: Date.now() })
-          prefetchState = {
-            running: false,
-            waitingAuth: true,
-            complete: false,
-            done: job.done,
-            total,
-            remaining: pending.size + failedIds.size,
-            updatedAt: Date.now(),
-          }
-          broadcast({
-            type: 'prefetch-progress',
-            automatic: true,
-            waitingAuth: true,
-            done: job.done,
-            total,
-            remaining: pending.size + failedIds.size,
-          })
-          return { waitingAuth: true, done: job.done, total }
-        }
-        job.failed += 1
-        failedIds.add(id)
-        failures.push({ id, message: error?.message || String(error) })
-      }
-      job.updatedAt = Date.now()
-      prefetchState = {
-        running: true,
-        waitingAuth: false,
-        complete: false,
-        done: job.done,
-        total,
-        remaining: pending.size + failedIds.size,
-        updatedAt: Date.now(),
-      }
-      await store.setPrefetchJob(job)
-      broadcast({
-        type: 'prefetch-progress',
-        automatic: true,
-        id,
-        done: job.done,
-        total,
-        remaining: pending.size + failedIds.size,
-      })
-    }
-    const remaining = new Set([...pending, ...failedIds])
-    const completed = remaining.size === 0
-    prefetchState = {
-      running: false,
-      waitingAuth: false,
-      complete: completed,
-      done: job.done,
+    emit({
+      id: ids[ids.length - 1],
+      done,
       total,
-      remaining: remaining.size,
-      updatedAt: Date.now(),
-    }
-
-    invalidateCachedEmbeddings()
-    invalidateRecommender()
-    if (completed) {
-      await store.clearPrefetchJob()
-      try {
-        chrome.alarms?.clear(AUTO_PREFETCH_ALARM)
-      } catch {
-      }
-    } else {
-      try {
-        chrome.alarms?.create(AUTO_PREFETCH_ALARM, { delayInMinutes: 0.5 })
-      } catch {
-      }
-    }
-    broadcast({ type: 'data-changed', kind: 'embeddings' })
-    broadcast({
-      type: 'prefetch-progress',
-      automatic: true,
-      complete: completed,
-      done: job.done,
-      total,
-      remaining: remaining.size,
+      failed,
+      etaSeconds,
     })
-    return {
-      done: job.done,
-      total,
-      failed: job.failed,
-      remaining: remaining.size,
-      failures,
-    }
-  })().catch((error) => {
-    console.error('automatic prefetch failed', error)
-    prefetchState = {
-      ...prefetchState,
-      running: false,
-      complete: false,
-      updatedAt: Date.now(),
-    }
-    try {
-      chrome.alarms?.create(AUTO_PREFETCH_ALARM, { delayInMinutes: 0.5 })
-    } catch {
-    }
-    return { retry: true, error: error?.message || String(error) }
-  })
-  const current = autoPrefetchPromise
-  current.finally(() => {
-    if (autoPrefetchPromise === current) autoPrefetchPromise = null
-  })
-  return current
-}
-
-async function prefetch(onProgress) {
-  await initialize()
-  await requireRemoteConsent()
-  if (autoPrefetchPromise) {
-    await autoPrefetchPromise.catch(() => {})
-  }
-  const [catalog, { vectors }] = await Promise.all([ensureCatalog(), getRecommender(true)])
-  const missing = missingTrackIds(catalog.tracks, vectors)
-  const total = new Set(catalog.tracks.map((track) => track.id)).size
-  let done = Math.max(0, total - missing.length)
-  let failed = 0
-  const failures = []
-
-  for (const id of missing) {
-    onProgress?.({ id, done, total, failed })
-    try {
-      const { vector } = await embedTrack(id)
-      await cacheEmbedding(id, vector)
-      done += 1
-    } catch (error) {
-      if (error?.code === 'token_expired' || error?.name === 'AuthError') throw error
-      failed += 1
-      failures.push({ id, message: error?.message || String(error) })
-    }
-    onProgress?.({ id, done, total, failed })
+    if (batchWindow.size === 0 && queue.length === 0) break
+    if (refilled || result.ready.size > 0) wait = EMBED_POLL_START_MS
+    await delay(wait)
+    wait = Math.min(EMBED_POLL_MAX_MS, Math.round(wait * 1.4))
   }
 
+  await store.clearPrefetchJob().catch(() => {})
+  try {
+    chrome.alarms?.clear(MANUAL_PREFETCH_ALARM)
+  } catch {
+  }
+  prefetchState = {
+    running: false,
+    waitingAuth: false,
+    complete: true,
+    done,
+    total,
+    remaining: 0,
+    startedAt,
+    startDone: baselineDone,
+    etaSeconds: null,
+    failed,
+    unavailable: Object.keys(await activeUnavailable()).length,
+    updatedAt: Date.now(),
+  }
   invalidateCachedEmbeddings()
   invalidateRecommender()
   await getRecommender(true)
@@ -994,7 +983,7 @@ async function importPlaylist(text) {
   const current = await store.getCurrent()
   if (current && !ids.has(current)) await store.setCurrent(null)
   broadcast({ type: 'data-changed', kind: 'playlist' })
-  autoPrefetchMissing().catch(() => {})
+  startVectorFetch().catch(() => {})
   return { ok: true, ...playlistSummary(playlist) }
 }
 
@@ -1097,6 +1086,7 @@ const CONSOLE_HELP = [
   'remove <id...>                           tombstone: hidden from playlists and imports',
   'restore <id...>                          undo a tombstone, return to catalog',
   'forget <id...>                           erase track, vector, history and tombstone',
+  'remove-unavailable                        tombstone every marked unavailable track',
   'target <0-100>                           set target similarity',
   'auto on|off                              toggle auto advance',
   'login | logout                           manage the account session',
@@ -1533,6 +1523,75 @@ async function consoleForget(args, flags) {
   }
 }
 
+async function consoleRemoveUnavailable(flags) {
+  const unavailable = await activeUnavailable()
+  const ids = Object.keys(unavailable)
+  if (ids.length === 0) {
+    return {
+      preview: {
+        title: 'remove unavailable',
+        summary: 'no unavailable vectors are marked',
+        items: [],
+        destructive: false,
+      },
+      apply: async () => ['no unavailable vectors'],
+    }
+  }
+  const { catalog, removed } = await consoleState()
+  const byId = new Map(catalog.tracks.map((track) => [track.id, track]))
+  const targets = ids.map((id) => byId.get(id)).filter(Boolean)
+  const missing = ids.filter((id) => !byId.has(id))
+  const items = [
+    ...targets.map((track) =>
+      trackItem(track, {
+        prefix: 'remove  ',
+        suffix: `  (${unavailable[track.id]?.code || 'unavailable'})`,
+      }),
+    ),
+    ...missing.map((id) => ({ text: `clear   ${id}  (not in the catalog)` })),
+  ]
+  return {
+    preview: {
+      title: 'remove unavailable',
+      summary: `tombstone ${targets.length} · clear ${ids.length} marks`,
+      items: consoleFilter(items, flags),
+      destructive: true,
+    },
+    apply: async () => {
+      const at = new Date().toISOString()
+      const nextRemoved = new Map(removed)
+      for (const track of targets) nextRemoved.set(track.id, { track, at })
+      await store.setRemovedTracks(nextRemoved)
+      if (targets.length > 0) {
+        const nextCatalog = {
+          format: FORMAT,
+          version: VERSION,
+          tracks: catalog.tracks.filter((track) => !ids.includes(track.id)),
+        }
+        await store.setCatalog(nextCatalog)
+        catalogCache = nextCatalog
+      }
+      await store.deleteVectorCacheEntries(ids)
+      const nextUnavailable = { ...unavailable }
+      for (const id of ids) delete nextUnavailable[id]
+      await store.setUnavailableVectors(nextUnavailable)
+      const history = await store.getHistory()
+      await store.setHistory(history.filter((id) => !ids.includes(id)))
+      const current = await store.getCurrent()
+      if (current && ids.includes(current)) await store.setCurrent(null)
+      lastDecision = null
+      await store.clearLastDecision().catch(() => {})
+      invalidateCachedEmbeddings()
+      invalidateRecommender()
+      broadcast({ type: 'data-changed', kind: 'catalog' })
+      return [
+        `tombstoned ${targets.length} track${targets.length === 1 ? '' : 's'}`,
+        `cleared ${ids.length} unavailable mark${ids.length === 1 ? '' : 's'}`,
+      ]
+    },
+  }
+}
+
 async function consoleStage(args, flags) {
   const action = String(args[0] || '').toLowerCase()
   const { staged, removed } = await consoleState()
@@ -1653,8 +1712,8 @@ async function consoleAuto(args) {
 async function consoleLogin() {
   await requireRemoteConsent()
   const session = await authConnect()
-  autoPrefetchMissing().catch(() => {})
-  return [`signed in${session?.devMode ? ' (dev mode)' : ''}`, 'prefetch queued']
+  startVectorFetch().catch(() => {})
+  return [`signed in${session?.devMode ? ' (dev mode)' : ''}`]
 }
 
 async function consoleLogout() {
@@ -1708,11 +1767,8 @@ async function consoleConsent(args) {
 }
 
 async function consolePrefetch() {
-  const result = await autoPrefetchMissing()
-  return [
-    `prefetch ${result.done ?? 0}/${result.total ?? 0}`,
-    ...(result.waitingConsent ? ['consent required before remote fetching'] : []),
-  ]
+  const result = await prefetch()
+  return [`prefetch ${result.done ?? 0}/${result.total ?? 0}`]
 }
 
 const partInfoCache = new Map()
@@ -1835,6 +1891,8 @@ async function runConsoleCommand(message) {
       return settle(await consoleRestore(args, flags))
     case 'forget':
       return settle(await consoleForget(args, flags))
+    case 'remove-unavailable':
+      return settle(await consoleRemoveUnavailable(flags))
     case 'stage':
       return settle(await consoleStage(args, flags))
     case 'target':
@@ -1869,7 +1927,7 @@ async function handleMessage(message, sender) {
     case 'connect':
       await requireRemoteConsent()
       await authConnect()
-      autoPrefetchMissing().catch(() => {})
+      startVectorFetch().catch(() => {})
       return status()
     case 'consent-status':
       return { ok: true, consent: await consentStatus() }
@@ -1914,8 +1972,22 @@ async function handleMessage(message, sender) {
       if (!lastDecision) lastDecision = await store.getLastDecision()
       return { ok: true, log: lastDecision }
     case 'ensure-prefetch':
-      autoPrefetchMissing().catch(() => {})
       return { ok: true, prefetch: prefetchState }
+    case 'unavailable-list': {
+      const entries = await activeUnavailable()
+      const catalog = await ensureCatalog()
+      const byId = new Map(catalog.tracks.map((track) => [track.id, track]))
+      return {
+        ok: true,
+        unavailable: Object.entries(entries).map(([id, entry]) => ({
+          id,
+          title: entry.title || byId.get(id)?.title || '',
+          code: entry.code,
+          message: entry.message,
+          at: entry.at,
+        })),
+      }
+    }
     case 'soft-nav-finished': {
       const tabId = sender?.tab?.id
       if (!Number.isInteger(tabId)) return { ok: false, error: 'no tab' }
@@ -2012,10 +2084,11 @@ async function handleMessage(message, sender) {
       }
       const count = await cacheEmbeddings(accepted)
       if (count > 0) {
+        await store.clearVectorUnavailableMany([...accepted.keys()])
         invalidateCachedEmbeddings()
         invalidateRecommender()
         broadcast({ type: 'data-changed', kind: 'embeddings' })
-        autoPrefetchMissing().catch(() => {})
+        startVectorFetch().catch(() => {})
       }
       return { ok: true, count, ignored }
     }
@@ -2032,17 +2105,14 @@ async function handleMessage(message, sender) {
       const existingDim = vectors.values().next().value?.length ?? null
       const parsed = parseVectors(message.text, { dim: existingDim ?? EMBEDDING_DIM })
       const count = await cacheEmbeddings(parsed.vectors)
+      await store.clearVectorUnavailableMany([...parsed.vectors.keys()])
       invalidateCachedEmbeddings()
       invalidateRecommender()
       broadcast({ type: 'data-changed', kind: 'embeddings' })
       return { ok: true, count, dim: parsed.dim }
     }
-    case 'prefetch': {
-      const { ok, ...result } = await prefetch((progress) => {
-        chrome.runtime.sendMessage({ type: 'prefetch-progress', ...progress }).catch(() => {})
-      })
-      return { ok, ...result }
-    }
+    case 'prefetch':
+      return prefetch()
     case 'save-config':
       return saveConfig(message.config || {})
     case 'set-target':
@@ -2066,7 +2136,6 @@ async function handleMessage(message, sender) {
       return { ok: true }
     case 'reset-vectors':
       await store.clearVectorCache()
-      autoPrefetchPromise = null
       invalidateCachedEmbeddings()
       invalidateRecommender()
       broadcast({ type: 'data-changed', kind: 'embeddings' })
@@ -2106,15 +2175,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   initialize()
-    .then(() => autoPrefetchMissing())
+    .then(() => startVectorFetch())
     .catch((error) => console.error('initialization failed', error))
 })
 
 if (chrome.alarms?.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm?.name === AUTO_PREFETCH_ALARM) {
-      autoPrefetchPromise = null
-      autoPrefetchMissing().catch((error) => console.error('alarm prefetch failed', error))
+    if (alarm?.name === MANUAL_PREFETCH_ALARM) {
+      resumeManualPrefetch().catch((error) => console.error('manual prefetch alarm failed', error))
     }
   })
 }
@@ -2124,6 +2192,7 @@ chrome.runtime.onStartup.addListener(() => {
   updateTabs(() => ({})).catch(() => {})
   initialize()
     .then(() => store.resetSessionPlays())
-    .then(() => autoPrefetchMissing())
+    .then(() => resumeManualPrefetch())
+    .then(() => startVectorFetch())
     .catch((error) => console.error('initialization failed', error))
 })

@@ -9,11 +9,14 @@ full control.
 It runs on Bilibili today; the engine is platform-agnostic, so other platforms
 can follow.
 
-The backend is a stateless Docker service that embeds audio with EfficientAT and
-exposes only `POST /v1/embed`. It verifies a delegated jawbts-api JWT, downloads
-the requested Bilibili audio, computes a 960-D vector, and deletes the temporary
-audio; it keeps no catalog, vectors, history, or playback state. The Microsoft
-Edge / Chromium MV3 extension keeps all of that in IndexedDB and drives playback.
+The backend is a Docker service that embeds audio with EfficientAT and
+exposes `POST /v1/embed` plus the batch `POST /v1/embeddings` (up to 15 ids;
+only the ready ones are returned, the rest are queued). It verifies a delegated
+jawbts-api JWT, downloads the requested Bilibili audio, computes a 960-D vector,
+and deletes the temporary audio; it keeps no catalog, history or playback state,
+and caches computed vectors in the container's memory for up to 24 hours. The
+Microsoft Edge / Chromium MV3 extension keeps everything else in IndexedDB and
+drives playback.
 
 Install it from the Microsoft Edge Add-ons store:
 <https://microsoftedge.microsoft.com/addons/detail/oacjdflkiecoclphcfdopfoingkhbomm>
@@ -113,7 +116,8 @@ python3 scripts/package_extension.py
 ## Privacy
 
 The extension keeps its session, library and playback history in IndexedDB on
-your device; the embedding service is stateless. The full policy is in
+your device; the embedding service keeps no library, only a 24-hour in-memory
+vector cache keyed by track id. The full policy is in
 [PRIVACY.md](PRIVACY.md) ([中文](PRIVACY.zh-CN.md)).
 
 The embedder is optional. If you do not agree with sending audio to a shared

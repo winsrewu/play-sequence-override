@@ -27,7 +27,9 @@ by whoever runs them, not by us, and their own policies apply.
   stored locally in your browser (IndexedDB). They are not sent to us.
 - If you use the hosted embedding service, it receives only the request itself:
   your IP address, the video id, your bearer token and timestamps. It keeps no
-  library, vectors, history or account profile.
+  library, history or account profile; the computed vector is held in the
+  service's memory for up to 24 hours, keyed only by the track id, and is gone
+  on restart or expiry.
 - There is no analytics, telemetry, advertising, tracking or selling of data,
   and no automated decision-making with legal effects.
 
@@ -93,10 +95,14 @@ sequencing.
 
 ## The embedding service
 
-The optional backend exposes one route, `POST /v1/embed`. For each request it
-verifies the signed token, downloads the requested audio, computes a
-960-dimension vector and deletes the temporary audio. It keeps no catalog,
-vectors, history, playback state or user profile. Standard operational logs
+The optional backend exposes `POST /v1/embed` and the batch
+`POST /v1/embeddings`. For each request it verifies the signed token, downloads
+the requested audio, computes a 960-dimension vector and deletes the temporary
+audio. It keeps no catalog, history, playback state or user profile. Computed
+vectors are cached in the service's memory for up to 24 hours, keyed by the
+track id only (no account identifier); a restart or expiry clears them. A track
+that cannot be embedded leaves its id and error in the same memory (24 hours for
+unavailable videos, 60 seconds for transient failures). Standard operational logs
 (request path, status code, client address, timestamps) may be produced for
 security and debugging; the account subject is not logged, the audio is not
 retained, and operational logs have no automatic expiry: they are kept for as
@@ -166,8 +172,9 @@ and we answer within the time required by applicable law.
 - Hosted service: operational logs have no automatic expiry and are kept for as
   long as the service runs; audio is deleted immediately after the vector is
   computed.
-- There is no server-side account, library, vector store or playback history to
-  retain.
+- The service keeps no account, library or playback history. Computed vectors
+  stay in memory for up to 24 hours and are then dropped; a restart clears them
+  as well.
 
 ## Storage and deletion controls
 

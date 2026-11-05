@@ -112,6 +112,16 @@
       </section>
 
       <section>
+        <h2>Unavailable vectors</h2>
+        <p class="muted">
+          Tracks the embedding service reported as deleted or private. Automatic
+          fetching skips them for 24 hours and retries afterwards.
+        </p>
+        <ul id="unavailable-list" class="unavailable-list"></ul>
+        <p id="unavailable-status" class="muted"></p>
+      </section>
+
+      <section>
         <h2>Vector backup</h2>
         <p class="muted">
           Export every stored vector to a JSON file, or import a file produced by

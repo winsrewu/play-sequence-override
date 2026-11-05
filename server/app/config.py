@@ -89,6 +89,14 @@ class Settings:
     log_level: str = "info"
     max_request_bytes: int = 16 * 1024
 
+    # In-container vector cache (id -> vector); disabled with TTL 0.
+    vector_cache_ttl_seconds: int = 86400
+    vector_cache_max_entries: int = 4096
+    embed_workers: int = 2
+    embed_max_pending: int = 256
+    embed_failure_backoff_seconds: int = 60
+    embed_unavailable_ttl_seconds: int = 86400
+
     model_name: str = "mn10_as"
     embedding_dim: int = 960
     service_name: str = "jawbts-embed"
@@ -160,6 +168,20 @@ def load_settings() -> Settings:
         log_level=(_env("LOG_LEVEL", "info") or "info").lower(),
         max_request_bytes=_env_int(
             "MAX_REQUEST_BYTES", 16 * 1024, minimum=256, maximum=1024**2
+        ),
+        vector_cache_ttl_seconds=_env_int(
+            "VECTOR_CACHE_TTL_SECONDS", 86400, minimum=0, maximum=604800
+        ),
+        vector_cache_max_entries=_env_int(
+            "VECTOR_CACHE_MAX_ENTRIES", 4096, minimum=1, maximum=100000
+        ),
+        embed_workers=_env_int("EMBED_WORKERS", 2, minimum=1, maximum=16),
+        embed_max_pending=_env_int("EMBED_MAX_PENDING", 256, minimum=1, maximum=4096),
+        embed_failure_backoff_seconds=_env_int(
+            "EMBED_FAILURE_BACKOFF_SECONDS", 60, minimum=0, maximum=3600
+        ),
+        embed_unavailable_ttl_seconds=_env_int(
+            "EMBED_UNAVAILABLE_TTL_SECONDS", 86400, minimum=0, maximum=604800
         ),
         model_name=_env("MODEL_NAME", "mn10_as") or "mn10_as",
         embedding_dim=_env_int("EMBEDDING_DIM", 960, minimum=1, maximum=100000),

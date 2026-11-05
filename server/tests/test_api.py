@@ -244,7 +244,7 @@ def test_only_one_public_route(client: TestClient) -> None:
         for route in client.app.routes  # type: ignore[attr-defined]
         if getattr(route, "path", "").startswith("/")
     }
-    assert paths == {"/v1/embed"}
+    assert paths == {"/v1/embed", "/v1/embeddings"}
     assert client.get("/docs").status_code == 404
     assert client.get("/openapi.json").status_code == 404
     assert client.get("/").status_code == 404
@@ -387,3 +387,98 @@ def test_dev_mode_bypasses_auth(tmp_path: Path) -> None:
     assert response.status_code == 200, response.text
     assert response.headers["x-dev-mode"] == "true"
     assert response.json()["dim"] == 960
+
+
+def test_embed_is_cached_for_second_call(client: TestClient) -> None:
+    first = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV16y4y127Dz"},
+        headers={"Authorization": "Bearer good"},
+    )
+    second = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV16y4y127Dz"},
+        headers={"Authorization": "Bearer good"},
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.headers["x-embedding-cached"] == "false"
+    assert second.headers["x-embedding-cached"] == "true"
+    assert second.json()["embedding"] == first.json()["embedding"]
+    assert second.headers["x-audio-bytes"] == "10"
+
+
+def _batch(client: TestClient, ids: list[str]):
+    return client.post(
+        "/v1/embeddings",
+        json={"internal_ids": ids},
+        headers={"Authorization": "Bearer good"},
+    )
+
+
+def _wait_for_batch(client: TestClient, ids: list[str], timeout: float = 5.0):
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        body = _batch(client, ids).json()
+        if not body["pending"]:
+            return body
+        time.sleep(0.02)
+    raise AssertionError(f"batch did not finish: {body}")
+
+
+def test_batch_returns_ready_and_queues_missing(client: TestClient) -> None:
+    queued = _batch(client, ["BBV16y4y127Dz"])
+    assert queued.status_code == 200
+    assert queued.json()["embeddings"] == []
+    assert queued.json()["pending"] == ["BBV16y4y127Dz"]
+
+    ready = _wait_for_batch(client, ["BBV16y4y127Dz"])
+    assert [item["internal_id"] for item in ready["embeddings"]] == ["BBV16y4y127Dz"]
+    assert ready["embeddings"][0]["dim"] == 960
+    assert ready["pending"] == []
+
+
+def test_batch_deduplicates_ids(client: TestClient) -> None:
+    body = _batch(client, ["BBV16y4y127Dz", "BBV16y4y127Dz"]).json()
+    assert body["pending"] == ["BBV16y4y127Dz"]
+    ready = _wait_for_batch(client, ["BBV16y4y127Dz", "BBV16y4y127Dz"])
+    assert len(ready["embeddings"]) == 1
+
+
+def test_batch_rejects_more_than_fifteen(client: TestClient) -> None:
+    response = _batch(client, ["BBV16y4y127Dz"] * 16)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_batch_requires_auth(client: TestClient) -> None:
+    response = client.post("/v1/embeddings", json={"internal_ids": ["BBV16y4y127Dz"]})
+    assert response.status_code == 401
+
+
+def test_batch_reports_failed_tracks(client: TestClient) -> None:
+    queued = _batch(client, ["BBV1AA411p7zs"])
+    assert queued.json()["pending"] == ["BBV1AA411p7zs"]
+
+    body = _wait_for_batch(client, ["BBV1AA411p7zs"])
+    assert body["pending"] == []
+    assert [item["internal_id"] for item in body["failures"]] == ["BBV1AA411p7zs"]
+    assert body["failures"][0]["code"] == "upstream_error"
+
+    again = _batch(client, ["BBV1AA411p7zs"]).json()
+    assert again["pending"] == []
+    assert again["failures"][0]["internal_id"] == "BBV1AA411p7zs"
+
+
+def test_single_embed_reports_cached_failure(client: TestClient) -> None:
+    _batch(client, ["BBV1AA411p7zs"])
+    _wait_for_batch(client, ["BBV1AA411p7zs"])
+    response = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV1AA411p7zs"},
+        headers={"Authorization": "Bearer good"},
+    )
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_error"

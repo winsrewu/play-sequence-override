@@ -78,11 +78,32 @@ async function refreshConsent() {
   }
 }
 
+async function refreshUnavailable() {
+  const list = $('unavailable-list')
+  const status = $('unavailable-status')
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'unavailable-list' })
+    const entries = Array.isArray(response?.unavailable) ? response.unavailable : []
+    list.replaceChildren(
+      ...entries.map((entry) => {
+        const item = document.createElement('li')
+        item.textContent = `${entry.title || entry.id} — ${entry.message || entry.code}`
+        return item
+      }),
+    )
+    status.textContent =
+      entries.length === 0 ? 'No unavailable vectors.' : `${entries.length} marked unavailable.`
+  } catch (error) {
+    status.textContent = error?.message || String(error)
+  }
+}
+
 async function load() {
   const config = await getConfig()
   fillForm(config)
   renderMeta(config)
   await refreshConsent()
+  await refreshUnavailable()
   try {
     chrome.runtime
       .sendMessage({ type: 'ensure-prefetch' })
@@ -179,7 +200,19 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'prefetch-progress') {
     renderPrefetchState(message)
   }
+  if (message?.type === 'data-changed') {
+    refreshUnavailable().catch(() => {})
+  }
 })
+
+function formatEta(seconds) {
+  const value = Number(seconds)
+  if (!Number.isFinite(value) || value <= 0) return ''
+  const total = Math.round(value)
+  const minutes = Math.floor(total / 60)
+  const rest = total % 60
+  return minutes > 0 ? ` · ~${minutes}m ${rest}s left` : ` · ~${rest}s left`
+}
 
 function renderPrefetchState(state) {
   const progress = $('prefetch-progress')
@@ -197,15 +230,25 @@ function renderPrefetchState(state) {
   }
   if (state.complete) {
     progress.classList.add('hidden')
-    label.textContent = 'All vectors are present.'
+    const unavailable = Number(state.unavailable) || 0
+    const failed = Number(state.failed) || 0
+    label.textContent =
+      unavailable > 0
+        ? `All available vectors are present · ${unavailable} unavailable`
+        : failed > 0
+          ? `All available vectors are present · ${failed} failed`
+          : 'All vectors are present.'
     return
   }
   progress.classList.remove('hidden')
   progress.max = Math.max(1, state.total)
   progress.value = Math.min(state.total, state.done || 0)
+  const eta = formatEta(state.etaSeconds)
   label.textContent =
-    `Auto-fetching vectors ${progress.value}/${state.total}` +
-    (state.remaining ? ` · ${state.remaining} remaining` : '')
+    `Fetching vectors ${progress.value}/${state.total}` +
+    (state.remaining ? ` · ${state.remaining} remaining` : '') +
+    eta +
+    (state.running && !eta ? ' · estimating…' : '')
 }
 
 async function importEmbeddingFiles(files) {

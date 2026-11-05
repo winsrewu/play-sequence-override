@@ -24,6 +24,7 @@ export const KEYS = Object.freeze({
   tabRegistry: 'tabRegistry',
   derived: 'derived',
   consent: 'consent',
+  unavailable: 'unavailable',
   migrated: 'migrated_v2',
 })
 
@@ -274,6 +275,59 @@ export async function getTabRegistry() {
 
 export async function setTabRegistry(tabs) {
   await kvSet(KEYS.tabRegistry, tabs)
+}
+
+// Tracks the service reported as unavailable (deleted/private videos). These
+// are kept locally so automatic fetching does not retry them for a day.
+export async function getUnavailableVectors() {
+  await ensureMigrated()
+  const stored = await kvGet(KEYS.unavailable, {})
+  const result = {}
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return result
+  for (const [id, entry] of Object.entries(stored)) {
+    if (!entry || typeof entry !== 'object') continue
+    result[id] = {
+      code: typeof entry.code === 'string' ? entry.code : 'unavailable',
+      message: typeof entry.message === 'string' ? entry.message : '',
+      title: typeof entry.title === 'string' ? entry.title : '',
+      at: Number(entry.at) || 0,
+    }
+  }
+  return result
+}
+
+export async function setUnavailableVectors(entries) {
+  await kvSet(KEYS.unavailable, entries)
+}
+
+export async function markVectorUnavailable(id, { code, message, title }) {
+  const entries = await getUnavailableVectors()
+  entries[id] = {
+    code: code || 'unavailable',
+    message: message || '',
+    title: title || '',
+    at: Date.now(),
+  }
+  await setUnavailableVectors(entries)
+}
+
+export async function clearVectorUnavailableMany(ids) {
+  const entries = await getUnavailableVectors()
+  let changed = false
+  for (const id of ids) {
+    if (id in entries) {
+      delete entries[id]
+      changed = true
+    }
+  }
+  if (changed) await setUnavailableVectors(entries)
+}
+
+export async function clearVectorUnavailable(id) {
+  const entries = await getUnavailableVectors()
+  if (!(id in entries)) return
+  delete entries[id]
+  await setUnavailableVectors(entries)
 }
 
 // Consent to send request data to remote (non-local) services.

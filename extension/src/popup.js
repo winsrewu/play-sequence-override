@@ -61,6 +61,15 @@ function renderDecision(log) {
   summary.textContent = lines.join('\n')
 }
 
+function formatEta(seconds) {
+  const value = Number(seconds)
+  if (!Number.isFinite(value) || value <= 0) return ''
+  const total = Math.round(value)
+  const minutes = Math.floor(total / 60)
+  const rest = total % 60
+  return minutes > 0 ? ` · ~${minutes}m ${rest}s left` : ` · ~${rest}s left`
+}
+
 function renderPrefetchState(state, missingCount, catalogCount, embeddedCount) {
   const progress = $('prefetch-progress')
   const label = $('prefetch-label')
@@ -72,7 +81,6 @@ function renderPrefetchState(state, missingCount, catalogCount, embeddedCount) {
   }
   if (!state && missing === 0) {
     progress.classList.add('hidden')
-    $('prefetch-auth').classList.add('hidden')
     label.textContent = ''
     return
   }
@@ -87,8 +95,14 @@ function renderPrefetchState(state, missingCount, catalogCount, embeddedCount) {
   }
   if (state?.complete && remaining(state) === 0) {
     progress.classList.add('hidden')
-    $('prefetch-auth').classList.add('hidden')
-    label.textContent = 'All vectors are present.'
+    const unavailable = Number(state?.unavailable) || 0
+    const failed = Number(state?.failed) || 0
+    label.textContent =
+      unavailable > 0
+        ? `All available vectors are present · ${unavailable} unavailable`
+        : failed > 0
+          ? `All available vectors are present · ${failed} failed`
+          : 'All vectors are present.'
     return
   }
   progress.classList.remove('hidden')
@@ -96,13 +110,14 @@ function renderPrefetchState(state, missingCount, catalogCount, embeddedCount) {
   progress.value = Math.min(total, done)
   if (state?.waitingAuth) {
     label.textContent = `Sign in to fetch ${state?.remaining || missing} missing vectors automatically.`
-    $('prefetch-auth').classList.remove('hidden')
     return
   }
-  $('prefetch-auth').classList.add('hidden')
+  const eta = formatEta(state?.etaSeconds)
   label.textContent =
-    `Auto-fetching vectors ${progress.value}/${total}` +
-    (state?.remaining ? ` · ${state.remaining} remaining` : '')
+    `Fetching vectors ${progress.value}/${total}` +
+    (state?.remaining ? ` · ${state.remaining} remaining` : '') +
+    eta +
+    (state?.running && !eta ? ' · estimating…' : '')
 }
 
 function remaining(state) {
@@ -159,6 +174,16 @@ function render(status, tab = null) {
     status.catalogCount,
     status.embeddedCount,
   )
+  const unavailable = Array.isArray(status.unavailable) ? status.unavailable : []
+  const unavailableLabel = $('unavailable-label')
+  if (unavailable.length > 0) {
+    const names = unavailable.slice(0, 3).map((item) => item.title || item.id)
+    unavailableLabel.textContent =
+      `${unavailable.length} unavailable: ${names.join(', ')}` +
+      (unavailable.length > 3 ? '…' : '')
+  } else {
+    unavailableLabel.textContent = ''
+  }
   const consent = status.consent || null
   const consentNeeded = Boolean(consent?.required && !consent.granted)
   $('vector-status').textContent = consentNeeded
@@ -258,12 +283,6 @@ $('connect').addEventListener('click', (event) => {
   })
 })
 
-$('prefetch-auth').addEventListener('click', (event) => {
-  run(event.currentTarget, async () => {
-    await send({ type: 'connect' })
-  })
-})
-
 $('disconnect').addEventListener('click', (event) => {
   run(event.currentTarget, async () => {
     await send({ type: 'disconnect' })
@@ -325,24 +344,6 @@ $('export-v2').addEventListener('click', (event) => {
   run(event.currentTarget, () => downloadExport())
 })
 
-$('prefetch').addEventListener('click', async (event) => {
-  const button = event.currentTarget
-  button.disabled = true
-  $('prefetch-progress').classList.remove('hidden')
-  $('prefetch-progress').value = 0
-  $('prefetch-progress').max = 1
-  $('prefetch-label').textContent = 'Starting…'
-  try {
-    const result = await send({ type: 'prefetch' })
-    $('prefetch-label').textContent = `Fetched ${result.done}/${result.total}.`
-  } catch (error) {
-    $('prefetch-label').textContent = error.message
-  } finally {
-    button.disabled = false
-    await refresh()
-  }
-})
-
 $('clear-history').addEventListener('click', (event) => {
   run(event.currentTarget, async () => {
     await send({ type: 'clear-history' })
@@ -399,19 +400,26 @@ chrome.runtime.onMessage.addListener((message) => {
     progress.value = 0
     $('prefetch-label').textContent =
       `Sign in to fetch ${message.remaining || 0} missing vectors automatically.`
-    $('prefetch-auth').classList.remove('hidden')
     return
   }
-  $('prefetch-auth').classList.add('hidden')
   progress.classList.remove('hidden')
   progress.max = Math.max(1, message.total)
   progress.value = Math.min(message.total, message.done)
+  const eta = formatEta(message.etaSeconds)
   $('prefetch-label').textContent =
-    `Auto-fetching vectors ${message.done}/${message.total}` +
-    (message.remaining ? ` · ${message.remaining} remaining` : '')
+    `Fetching vectors ${message.done}/${message.total}` +
+    (message.remaining ? ` · ${message.remaining} remaining` : '') +
+    eta +
+    (!eta && message.remaining ? ' · estimating…' : '')
   if (message.complete) {
-    $('prefetch-auth').classList.add('hidden')
-    $('prefetch-label').textContent = 'All vectors are present.'
+    const unavailable = Number(message.unavailable) || 0
+    const failed = Number(message.failed) || 0
+    $('prefetch-label').textContent =
+      unavailable > 0
+        ? `All available vectors are present · ${unavailable} unavailable`
+        : failed > 0
+          ? `All available vectors are present · ${failed} failed`
+          : 'All vectors are present.'
     setTimeout(() => progress.classList.add('hidden'), 2500)
   }
 })

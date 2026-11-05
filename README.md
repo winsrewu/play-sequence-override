@@ -15,6 +15,9 @@ the requested Bilibili audio, computes a 960-D vector, and deletes the temporary
 audio; it keeps no catalog, vectors, history, or playback state. The Microsoft
 Edge / Chromium MV3 extension keeps all of that in IndexedDB and drives playback.
 
+Install it from the Microsoft Edge Add-ons store:
+<https://microsoftedge.microsoft.com/addons/detail/oacjdflkiecoclphcfdopfoingkhbomm>
+
 ## Deploy
 
 Requirements: Docker with Compose, a jawbts-api instance, a jawbts-gateway
@@ -80,14 +83,24 @@ Then set the embedding URL to `http://localhost:8000/v1/embed` and enable
 
 ## Development
 
-`extension/` is the loadable plugin; there is no build and nothing to keep in
-sync.
+`extension/` is the loadable plugin and carries the public `key`, so loading it
+unpacked keeps the store id. There is nothing to build:
 
 ```bash
 cd extension
 npm run check
 npm test
 ```
+
+To publish, bump `VERSION`, sync the manifests, then package:
+
+```bash
+python3 scripts/version.py --write
+python3 scripts/package_extension.py
+```
+
+`dist/play-sequence-override-<version>.zip` is the upload; its manifest has the
+`key` field removed because the store signs the upload itself.
 
 ## Privacy
 

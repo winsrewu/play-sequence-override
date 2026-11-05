@@ -24,7 +24,17 @@ import {
   missingTrackIds,
 } from './lib/embeddings.js'
 import { EMBEDDING_DIM, parseEmbeddingText } from './lib/embedding-json.js'
-import { FORMAT, VERSION, exportV2, parseAnyPlaylist, playlistSummary } from './lib/playlist.js'
+import {
+  FORMAT,
+  VERSION,
+  exportV2,
+  parseAnyPlaylist,
+  parseInternalId,
+  playlistSummary,
+} from './lib/playlist.js'
+import { parseCommand } from './lib/command-parse.js'
+import { multiPageVideos, trackText } from './lib/console-format.js'
+import { IMPORT_SOURCES, resolveImportTracks } from './lib/import-sources.js'
 import { parseVectors, serializeVectors } from './lib/vector-json.js'
 import { forgetTab, isVideoPageUrl, isVideoTabUrl, ownerTab, ownerTabId, registerTab } from './lib/sequence.js'
 import * as store from './lib/storage.js'
@@ -279,6 +289,20 @@ async function requireRemoteConsent() {
       'Cross-border transfer consent is required in Settings & allowlist before the extension contacts a remote service.',
     )
   }
+}
+
+// Embeddings without a catalog (or staged) track are dropped automatically.
+async function pruneVectors() {
+  const [catalog, staged] = await Promise.all([ensureCatalog(), store.getStagedTracks()])
+  if (catalog.tracks.length === 0) return 0
+  const keep = new Set(catalog.tracks.map((track) => track.id))
+  for (const id of staged.keys()) keep.add(id)
+  const { vectors } = await loadAllVectors()
+  const stale = [...vectors.keys()].filter((id) => !keep.has(id))
+  if (stale.length === 0) return 0
+  await store.deleteVectorCacheEntries(stale)
+  invalidateCachedEmbeddings()
+  return stale.length
 }
 
 function invalidateRecommender() {
@@ -962,6 +986,7 @@ async function importPlaylist(text) {
   await store.setCatalog(playlist)
   catalogCache = playlist
   invalidateRecommender()
+  await pruneVectors().catch(() => 0)
 
   const ids = new Set(playlist.tracks.map((track) => track.id))
   const history = await store.getHistory()
@@ -1051,8 +1076,794 @@ async function playTrack(id, tabId = null) {
   return { ok: true, track: trackMeta(track) }
 }
 
+
+// ---------- console ----------
+
+let previewController = null
+
+const CONSOLE_HELP = [
+  'help                                     this list',
+  'status                                   library, staging, session and consent',
+  'library [--filter=text]                  list the catalog',
+  'staged [--filter=text]                   list the staging space',
+  'removed [--filter=text]                  list tombstones',
+  'track <id>                               show one track',
+  'import video|series|collection|favorites <id|url>',
+  '                                         resolve and stage (preview first)',
+  'import ... --show-removed                list only the tombstoned entries',
+  'stage remove <id...>                     remove from staging and tombstone',
+  'stage clear                              discard all staging',
+  'merge                                    staged -> catalog (skips removed)',
+  'remove <id...>                           tombstone: hidden from playlists and imports',
+  'restore <id...>                          undo a tombstone, return to catalog',
+  'forget <id...>                           erase track, vector, history and tombstone',
+  'target <0-100>                           set target similarity',
+  'auto on|off                              toggle auto advance',
+  'login | logout                           manage the account session',
+  'consent grant|revoke                     allow or revoke remote service calls',
+  'prefetch                                 fetch missing vectors',
+  'clear                                    clear this transcript',
+]
+
+function consoleListing(title, items = []) {
+  const mapped = items.map((item) => (typeof item === 'string' ? { text: item } : item))
+  return { title, items: mapped, total: mapped.length }
+}
+
+function consoleFilter(items, flags) {
+  if (flags.filter === true) throw new Error('--filter needs a value: --filter=text')
+  const value = typeof flags.filter === 'string' ? flags.filter.trim().toLowerCase() : ''
+  if (!value) return items
+  return items.filter((item) => String(item.text || '').toLowerCase().includes(value))
+}
+
+function trackItem(track, { prefix = '', multi = false, suffix = '', actions } = {}) {
+  return {
+    text: `${prefix}${trackText(track, { multi })}${suffix}`,
+    id: track.id,
+    videoId: track.video_id || track.videoId || null,
+    page: Number(track.page) || 1,
+    url: trackUrl(track),
+    ...(actions ? { actions } : {}),
+  }
+}
+
+async function consoleState() {
+  const [catalog, staged, removed] = await Promise.all([
+    ensureCatalog(),
+    store.getStagedTracks(),
+    store.getRemovedTracks(),
+  ])
+  return { catalog, staged, removed }
+}
+
+function consoleIds(args) {
+  if (args.length === 0) throw new Error('give at least one track id')
+  return args.map((value) => {
+    try {
+      return parseInternalId(String(value)).id
+    } catch (error) {
+      throw new Error(`${value}: ${error.message}`)
+    }
+  })
+}
+
+async function consoleStatus() {
+  const [catalog, staged, removed, session, currentId, config] = await Promise.all([
+    ensureCatalog(),
+    store.getStagedTracks(),
+    store.getRemovedTracks(),
+    authStatus(),
+    store.getCurrent(),
+    getConfig(),
+  ])
+  const current = catalog.tracks.find((track) => track.id === currentId)
+  const consent = await consentStatus(config)
+  const items = [
+    `catalog   ${catalog.tracks.length} tracks`,
+    `staged    ${staged.size}`,
+    `removed   ${removed.size}`,
+    current
+      ? { text: `current   ${current.id}  ${current.title}`, id: current.id, url: trackUrl(current) }
+      : 'current   nothing recorded',
+    `session   ${session.connected ? 'connected' : 'signed out'}`,
+    `consent   ${consent.required ? (consent.granted ? 'granted' : 'required') : 'local only'}`,
+    `target    ${config.targetSimilarity}% · auto advance ${config.autoAdvance ? 'on' : 'off'}`,
+  ]
+  return consoleListing('status', items)
+}
+
+async function consoleLibrary(flags) {
+  const catalog = await ensureCatalog()
+  const multi = multiPageVideos(catalog.tracks)
+  const items = catalog.tracks.map((track) =>
+    trackItem(track, {
+      multi: multi.has(track.video_id),
+      actions: [{ label: 'Remove', command: `remove ${track.id}` }],
+    }),
+  )
+  return consoleListing('library', consoleFilter(items, flags))
+}
+
+async function consoleStaged(flags) {
+  const staged = await store.getStagedTracks()
+  const tracks = [...staged.values()]
+  const multi = multiPageVideos(tracks)
+  const items = tracks.map((track) =>
+    trackItem(track, {
+      multi: multi.has(track.video_id),
+      actions: [{ label: 'Remove', command: `stage remove ${track.id}` }],
+    }),
+  )
+  return consoleListing('staged', consoleFilter(items, flags))
+}
+
+async function consoleRemoved(flags) {
+  const removed = await store.getRemovedTracks()
+  const multi = multiPageVideos([...removed.values()].map((entry) => entry.track))
+  const items = [...removed.entries()].map(([id, entry]) =>
+    trackItem(entry.track, {
+      multi: multi.has(entry.track.video_id),
+      suffix: `  removed ${entry.at ? entry.at.slice(0, 10) : ''}`,
+      actions: [
+        { label: 'Restore', command: `restore ${id}` },
+        { label: 'Forget', command: `forget ${id}` },
+      ],
+    }),
+  )
+  return consoleListing('removed', consoleFilter(items, flags))
+}
+
+async function consoleTrack(args) {
+  const id = consoleIds([args[0]])[0]
+  const { catalog, staged, removed } = await consoleState()
+  const track =
+    catalog.tracks.find((item) => item.id === id) || staged.get(id) || removed.get(id)?.track
+  if (!track) throw new Error(`${id} is not in the catalog, staging or removed`)
+  const where = catalog.tracks.some((item) => item.id === id)
+    ? 'catalog'
+    : staged.has(id)
+      ? 'staged'
+      : 'removed'
+  return consoleListing(`track ${id}`, [
+    { text: `id        ${track.id}`, id: track.id, url: trackUrl(track) },
+    `title     ${track.title}`,
+    `provider  ${track.provider}`,
+    `video_id  ${track.video_id}`,
+    `page      ${track.page}`,
+    `state     ${where}`,
+  ])
+}
+
+async function consoleImport(args, flags, signal) {
+  const source = String(args[0] || '').toLowerCase()
+  const target = args[1]
+  if (!IMPORT_SOURCES.includes(source)) {
+    throw new Error('usage: import video|series|collection|favorites <id|url>')
+  }
+  if (!target) throw new Error('missing id or URL')
+  let tracks
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 15000)
+  const forwardAbort = () => controller.abort()
+  signal?.addEventListener('abort', forwardAbort, { once: true })
+  try {
+    tracks = await resolveImportTracks(source, target, { signal: controller.signal })
+  } catch (error) {
+    const message = error?.message || String(error)
+    return {
+      preview: {
+        title: `import ${source} ${target}`,
+        summary: message,
+        items: [],
+        destructive: false,
+        blocked: message,
+      },
+      result: [message],
+    }
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', forwardAbort)
+  }
+  const { catalog, staged, removed } = await consoleState()
+  const catalogIds = new Set(catalog.tracks.map((track) => track.id))
+  const stagedIds = new Set(staged.keys())
+  const removedHits = tracks.filter((track) => removed.has(track.id))
+  const fresh = tracks.filter(
+    (track) => !removed.has(track.id) && !stagedIds.has(track.id) && !catalogIds.has(track.id),
+  )
+  const duplicates = tracks.filter((track) => !removed.has(track.id) && !fresh.includes(track))
+
+  if (flags['show-removed']) {
+    const multiRemoved = multiPageVideos(removedHits)
+    return {
+      preview: {
+        title: `import ${source} ${target} · removed only`,
+        summary: `${removedHits.length} removed · nothing will be staged`,
+        items: consoleFilter(
+          removedHits.map((track) =>
+            trackItem(track, { prefix: 'removed  ', multi: multiRemoved.has(track.video_id) }),
+          ),
+          flags,
+        ),
+        destructive: false,
+      },
+      result: [`removed only · ${removedHits.length} · nothing staged`],
+    }
+  }
+
+  const multi = multiPageVideos(tracks)
+  const items = [
+    ...fresh.map((track) => trackItem(track, { prefix: 'add     ', multi: multi.has(track.video_id) })),
+    ...duplicates.map((track) =>
+      trackItem(track, {
+        prefix: 'skip    ',
+        multi: multi.has(track.video_id),
+        suffix: '  (already staged or in catalog)',
+      }),
+    ),
+  ]
+  return {
+    preview: {
+      title: `import ${source} ${target}`,
+      summary: `add ${fresh.length} · skip ${duplicates.length} duplicates · skip ${removedHits.length} removed`,
+      items: consoleFilter(items, flags),
+      destructive: false,
+    },
+    apply: async () => {
+      if (fresh.length > 0) {
+        const next = new Map(staged)
+        for (const track of fresh) next.set(track.id, track)
+        await store.setStagedTracks(next)
+        broadcast({ type: 'data-changed', kind: 'catalog' })
+      }
+      return [
+        `staged ${fresh.length} track${fresh.length === 1 ? '' : 's'}`,
+        `skipped ${duplicates.length} duplicates · ${removedHits.length} removed`,
+        `staged total ${staged.size + fresh.length}`,
+      ]
+    },
+  }
+}
+
+async function consoleMerge(flags) {
+  const { catalog, staged, removed } = await consoleState()
+  const catalogIds = new Set(catalog.tracks.map((track) => track.id))
+  const add = []
+  const removedRows = []
+  const duplicateRows = []
+  for (const [id, track] of staged) {
+    if (removed.has(id)) removedRows.push(track)
+    else if (catalogIds.has(id)) duplicateRows.push(track)
+    else add.push(track)
+  }
+  const multi = multiPageVideos([...staged.values()])
+  const items = [
+    ...add.map((track) => trackItem(track, { prefix: 'add     ', multi: multi.has(track.video_id) })),
+    ...removedRows.map((track) =>
+      trackItem(track, { prefix: 'skip    ', multi: multi.has(track.video_id), suffix: '  (removed)' }),
+    ),
+    ...duplicateRows.map((track) =>
+      trackItem(track, {
+        prefix: 'skip    ',
+        multi: multi.has(track.video_id),
+        suffix: '  (already in catalog)',
+      }),
+    ),
+  ]
+  return {
+    preview: {
+      title: 'merge staged → catalog',
+      summary: `add ${add.length} · skip ${removedRows.length} removed · skip ${duplicateRows.length} duplicates`,
+      items: consoleFilter(items, flags),
+      destructive: false,
+    },
+    apply: async () => {
+      if (add.length > 0) {
+        const next = { format: FORMAT, version: VERSION, tracks: [...catalog.tracks, ...add] }
+        await store.setCatalog(next)
+        catalogCache = next
+        invalidateRecommender()
+      }
+      await store.setStagedTracks(new Map())
+      broadcast({ type: 'data-changed', kind: 'catalog' })
+      return [
+        `merged ${add.length} track${add.length === 1 ? '' : 's'}`,
+        `skipped ${removedRows.length} removed · ${duplicateRows.length} duplicates`,
+        'staging cleared',
+      ]
+    },
+  }
+}
+
+async function consoleRemove(args, flags) {
+  const ids = consoleIds(args)
+  const { catalog, removed } = await consoleState()
+  const byId = new Map(catalog.tracks.map((track) => [track.id, track]))
+  const targets = ids.map((id) => byId.get(id)).filter(Boolean)
+  const missing = ids.filter((id) => !byId.has(id))
+  const items = [
+    ...targets.map((track) => trackItem(track, { prefix: 'remove  ' })),
+    ...missing.map((id) => ({ text: `missing ${id}  (not in the catalog)` })),
+  ]
+  return {
+    preview: {
+      title: 'remove',
+      summary: `remove ${targets.length} · hidden from playlists and future imports`,
+      items: consoleFilter(items, flags),
+      destructive: targets.length > 0,
+    },
+    apply: async () => {
+      if (targets.length === 0) return ['nothing removed']
+      const nextRemoved = new Map(removed)
+      const at = new Date().toISOString()
+      for (const track of targets) nextRemoved.set(track.id, { track, at })
+      await store.setRemovedTracks(nextRemoved)
+      const nextCatalog = {
+        format: FORMAT,
+        version: VERSION,
+        tracks: catalog.tracks.filter((track) => !ids.includes(track.id)),
+      }
+      await store.setCatalog(nextCatalog)
+      catalogCache = nextCatalog
+      await store.deleteVectorCacheEntries(targets.map((track) => track.id))
+      const current = await store.getCurrent()
+      if (current && ids.includes(current)) await store.setCurrent(null)
+      const history = await store.getHistory()
+      await store.setHistory(history.filter((id) => !ids.includes(id)))
+      lastDecision = null
+      await store.clearLastDecision().catch(() => {})
+      invalidateCachedEmbeddings()
+      invalidateRecommender()
+      broadcast({ type: 'data-changed', kind: 'catalog' })
+      return [
+        `removed ${targets.length} track${targets.length === 1 ? '' : 's'}`,
+        'restore with: restore <id>',
+      ]
+    },
+  }
+}
+
+async function consoleRestore(args, flags) {
+  const ids = consoleIds(args)
+  const { catalog, removed } = await consoleState()
+  const entries = ids.map((id) => [id, removed.get(id)]).filter(([, entry]) => Boolean(entry))
+  const missing = ids.filter((id) => !removed.has(id))
+  const items = [
+    ...entries.map(([, entry]) => trackItem(entry.track, { prefix: 'restore  ' })),
+    ...missing.map((id) => ({ text: `missing ${id}  (no tombstone)` })),
+  ]
+  return {
+    preview: {
+      title: 'restore',
+      summary: `restore ${entries.length} · imports may include them again`,
+      items: consoleFilter(items, flags),
+      destructive: false,
+    },
+    apply: async () => {
+      if (entries.length === 0) return ['nothing restored']
+      const nextRemoved = new Map(removed)
+      const catalogIds = new Set(catalog.tracks.map((track) => track.id))
+      const add = []
+      for (const [id, entry] of entries) {
+        nextRemoved.delete(id)
+        if (!catalogIds.has(id)) add.push(entry.track)
+      }
+      await store.setRemovedTracks(nextRemoved)
+      if (add.length > 0) {
+        const next = { format: FORMAT, version: VERSION, tracks: [...catalog.tracks, ...add] }
+        await store.setCatalog(next)
+        catalogCache = next
+        invalidateRecommender()
+      }
+      broadcast({ type: 'data-changed', kind: 'catalog' })
+      return [
+        `restored ${entries.length} track${entries.length === 1 ? '' : 's'}`,
+        ...(add.length > 0 ? [`${add.length} returned to the catalog`] : []),
+      ]
+    },
+  }
+}
+
+async function consoleForget(args, flags) {
+  const ids = consoleIds(args)
+  const { catalog, staged, removed } = await consoleState()
+  const inCatalog = catalog.tracks.filter((track) => ids.includes(track.id))
+  const inStaged = [...staged.values()].filter((track) => ids.includes(track.id))
+  const tombstones = ids.filter((id) => removed.has(id))
+  if (inCatalog.length === 0 && inStaged.length === 0 && tombstones.length === 0) {
+    throw new Error('no matching catalog, staged or removed track')
+  }
+  const history = await store.getHistory()
+  const historyHits = history.filter((id) => ids.includes(id)).length
+  const items = [
+    ...inCatalog.map((track) => trackItem(track, { prefix: 'catalog   ' })),
+    ...inStaged.map((track) => trackItem(track, { prefix: 'staged    ' })),
+    ...tombstones.map((id) =>
+      trackItem(removed.get(id).track, { prefix: 'tombstone ' }),
+    ),
+    { text: `vector    ${ids.length} entries` },
+    { text: `history   ${historyHits} entries` },
+    { text: 'a future import may add it again' },
+  ]
+  return {
+    preview: {
+      title: 'forget',
+      summary: `erase ${ids.length} track${ids.length === 1 ? '' : 's'} completely`,
+      items: consoleFilter(items, flags),
+      destructive: true,
+    },
+    apply: async () => {
+      const nextCatalog = {
+        format: FORMAT,
+        version: VERSION,
+        tracks: catalog.tracks.filter((track) => !ids.includes(track.id)),
+      }
+      await store.setCatalog(nextCatalog)
+      catalogCache = nextCatalog
+      const nextStaged = new Map(staged)
+      for (const id of ids) nextStaged.delete(id)
+      await store.setStagedTracks(nextStaged)
+      const nextRemoved = new Map(removed)
+      for (const id of ids) nextRemoved.delete(id)
+      await store.setRemovedTracks(nextRemoved)
+      await store.deleteVectorCacheEntries(ids)
+      await store.setHistory(history.filter((id) => !ids.includes(id)))
+      const plays = await store.getSessionPlays()
+      let playsChanged = false
+      for (const id of ids) {
+        if (Object.prototype.hasOwnProperty.call(plays, id)) {
+          delete plays[id]
+          playsChanged = true
+        }
+      }
+      if (playsChanged) await store.setSessionPlays(plays)
+      const current = await store.getCurrent()
+      if (current && ids.includes(current)) await store.setCurrent(null)
+      lastDecision = null
+      await store.clearLastDecision().catch(() => {})
+      invalidateCachedEmbeddings()
+      invalidateRecommender()
+      broadcast({ type: 'data-changed', kind: 'catalog' })
+      return [
+        `forgot ${ids.length} track${ids.length === 1 ? '' : 's'}`,
+        'catalog, vectors, history and tombstones are gone',
+      ]
+    },
+  }
+}
+
+async function consoleStage(args, flags) {
+  const action = String(args[0] || '').toLowerCase()
+  const { staged, removed } = await consoleState()
+  const at = new Date().toISOString()
+
+  function tombstone(nextStaged, nextRemoved, targets) {
+    for (const track of targets) {
+      nextStaged.delete(track.id)
+      nextRemoved.set(track.id, { track, at })
+    }
+  }
+
+  if (action === 'clear') {
+    const tracks = [...staged.values()]
+    const multi = multiPageVideos(tracks)
+    const items = tracks.map((track) =>
+      trackItem(track, { prefix: 'remove  ', multi: multi.has(track.video_id) }),
+    )
+    return {
+      preview: {
+        title: 'stage clear',
+        summary: `remove ${tracks.length} staged track${tracks.length === 1 ? '' : 's'} · tombstones written`,
+        items: consoleFilter(items, flags),
+        destructive: tracks.length > 0,
+      },
+      apply: async () => {
+        const nextStaged = new Map()
+        const nextRemoved = new Map(removed)
+        tombstone(nextStaged, nextRemoved, tracks)
+        await store.setStagedTracks(nextStaged)
+        await store.setRemovedTracks(nextRemoved)
+        await store.deleteVectorCacheEntries(tracks.map((track) => track.id))
+        invalidateCachedEmbeddings()
+        broadcast({ type: 'data-changed', kind: 'catalog' })
+        return [
+          `removed ${tracks.length} staged track${tracks.length === 1 ? '' : 's'}`,
+          'restore with: restore <id>',
+        ]
+      },
+    }
+  }
+
+  if (action !== 'remove') throw new Error('usage: stage remove <id...> | stage clear')
+  const ids = consoleIds(args.slice(1))
+  const targets = ids.map((id) => staged.get(id)).filter(Boolean)
+  const missing = ids.filter((id) => !staged.has(id))
+  const multi = multiPageVideos(targets)
+  const items = [
+    ...targets.map((track) =>
+      trackItem(track, { prefix: 'remove  ', multi: multi.has(track.video_id) }),
+    ),
+    ...missing.map((id) => ({ text: `missing ${id}  (not staged)` })),
+  ]
+  return {
+    preview: {
+      title: 'stage remove',
+      summary: `remove ${targets.length} from staging · tombstoned`,
+      items: consoleFilter(items, flags),
+      destructive: targets.length > 0,
+    },
+    apply: async () => {
+      if (targets.length === 0) return ['nothing staged to remove']
+      const nextStaged = new Map(staged)
+      const nextRemoved = new Map(removed)
+      tombstone(nextStaged, nextRemoved, targets)
+      await store.setStagedTracks(nextStaged)
+      await store.setRemovedTracks(nextRemoved)
+      await store.deleteVectorCacheEntries(targets.map((track) => track.id))
+      invalidateCachedEmbeddings()
+      broadcast({ type: 'data-changed', kind: 'catalog' })
+      return [
+        `removed ${targets.length} staged track${targets.length === 1 ? '' : 's'}`,
+        'restore with: restore <id>',
+      ]
+    },
+  }
+}
+
+async function consoleTarget(args) {
+  const value = Number(args[0])
+  if (!Number.isInteger(value) || value < 0 || value > 100) throw new Error('usage: target <0-100>')
+  const config = await getConfig()
+  return {
+    preview: {
+      title: 'target',
+      summary: `${config.targetSimilarity}% → ${value}%`,
+      items: [{ text: `targetSimilarity ${config.targetSimilarity} → ${value}` }],
+      destructive: false,
+    },
+    apply: async () => {
+      await setConfig({ ...config, targetSimilarity: value })
+      broadcast({ type: 'data-changed', kind: 'config' })
+      return [`target similarity ${value}%`]
+    },
+  }
+}
+
+async function consoleAuto(args) {
+  const action = String(args[0] || '').toLowerCase()
+  if (!['on', 'off'].includes(action)) throw new Error('usage: auto on|off')
+  const config = await getConfig()
+  const value = action === 'on'
+  return {
+    preview: {
+      title: 'auto',
+      summary: `auto advance ${config.autoAdvance ? 'on' : 'off'} → ${value ? 'on' : 'off'}`,
+      items: [{ text: `autoAdvance ${config.autoAdvance} → ${value}` }],
+      destructive: false,
+    },
+    apply: async () => {
+      await setConfig({ ...config, autoAdvance: value })
+      broadcast({ type: 'data-changed', kind: 'config' })
+      return [`auto advance ${value ? 'on' : 'off'}`]
+    },
+  }
+}
+
+async function consoleLogin() {
+  await requireRemoteConsent()
+  const session = await authConnect()
+  autoPrefetchMissing().catch(() => {})
+  return [`signed in${session?.devMode ? ' (dev mode)' : ''}`, 'prefetch queued']
+}
+
+async function consoleLogout() {
+  return {
+    preview: {
+      title: 'logout',
+      summary: 'clear the stored session',
+      items: [{ text: 'vector fetching stops until you sign in again' }],
+      destructive: true,
+    },
+    apply: async () => {
+      await authDisconnect()
+      return ['signed out']
+    },
+  }
+}
+
+async function consoleConsent(args) {
+  const action = String(args[0] || '').toLowerCase()
+  if (!['grant', 'revoke'].includes(action)) throw new Error('usage: consent grant|revoke')
+  const config = await getConfig()
+  const origins = remoteOrigins(config)
+  if (action === 'grant') {
+    return {
+      preview: {
+        title: 'consent grant',
+        summary: `allow request data to ${origins.join(', ') || 'no remote services'}`,
+        items: origins.map((origin) => ({ text: origin })),
+        destructive: false,
+      },
+      apply: async () => {
+        await store.setConsent({ granted: true, at: new Date().toISOString(), origins })
+        broadcast({ type: 'data-changed', kind: 'consent' })
+        return ['consent granted']
+      },
+    }
+  }
+  return {
+    preview: {
+      title: 'consent revoke',
+      summary: 'stop contacting remote services',
+      items: origins.map((origin) => ({ text: origin })),
+      destructive: true,
+    },
+    apply: async () => {
+      await store.clearConsent()
+      broadcast({ type: 'data-changed', kind: 'consent' })
+      return ['consent revoked']
+    },
+  }
+}
+
+async function consolePrefetch() {
+  const result = await autoPrefetchMissing()
+  return [
+    `prefetch ${result.done ?? 0}/${result.total ?? 0}`,
+    ...(result.waitingConsent ? ['consent required before remote fetching'] : []),
+  ]
+}
+
+const partInfoCache = new Map()
+const PART_INFO_TTL = 10 * 60 * 1000
+const PART_INFO_FAIL_TTL = 60 * 1000
+
+async function fetchPartInfo(bvid) {
+  const cached = partInfoCache.get(bvid)
+  if (cached && Date.now() - cached.at < cached.ttl) return cached.value
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 8000)
+  try {
+    const response = await fetch(`https://api.bilibili.com/x/player/pagelist?bvid=${bvid}`, {
+      credentials: 'include',
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const body = await response.json()
+    if (body.code !== 0 || !Array.isArray(body.data)) {
+      throw new Error(body.message || 'no page list')
+    }
+    const parts = body.data.map((entry) => String(entry.part || '').trim())
+    const info = { count: parts.length, parts }
+    if (partInfoCache.size > 400) partInfoCache.clear()
+    partInfoCache.set(bvid, { value: info, at: Date.now(), ttl: PART_INFO_TTL })
+    return info
+  } catch {
+    partInfoCache.set(bvid, { value: null, at: Date.now(), ttl: PART_INFO_FAIL_TTL })
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// Resolve P names for the first part of a video that only appears as P1 in the
+// library, so it can show "P1 <name>" even without P2 being imported.
+async function partInfo(ids) {
+  const unique = [
+    ...new Set(
+      (ids || []).filter((id) => typeof id === 'string' && /^BV[0-9A-Za-z]{10}$/.test(id)),
+    ),
+  ].slice(0, 30)
+  const info = {}
+  const queue = [...unique]
+  const workers = []
+  for (let index = 0; index < Math.min(4, queue.length); index += 1) {
+    workers.push(
+      (async () => {
+        while (queue.length > 0) {
+          const bvid = queue.shift()
+          const data = await fetchPartInfo(bvid)
+          if (data) info[bvid] = data
+        }
+      })(),
+    )
+  }
+  await Promise.all(workers)
+  return { ok: true, info }
+}
+
+async function consoleHeader() {
+  const [catalog, staged, removed, currentId] = await Promise.all([
+    ensureCatalog(),
+    store.getStagedTracks(),
+    store.getRemovedTracks(),
+    store.getCurrent(),
+  ])
+  return {
+    ok: true,
+    header: {
+      catalog: catalog.tracks.length,
+      staged: staged.size,
+      removed: removed.size,
+      current: currentId,
+    },
+  }
+}
+
+async function runConsoleCommand(message) {
+  const line = String(message.line ?? '').trim()
+  if (!line) throw new Error('empty command')
+  const { name, args, flags } = parseCommand(line)
+  const preview = Boolean(message.preview)
+  previewController?.abort()
+  previewController = preview ? new AbortController() : null
+  const previewSignal = preview ? previewController.signal : undefined
+
+  const settle = async (plan) => {
+    if (!plan) return {}
+    if (plan.listing) return { ok: true, listing: plan.listing }
+    // Previews are computed before Enter; running never re-shows one.
+    if (preview) return { ok: true, preview: plan.preview }
+    if (plan.preview?.blocked) {
+      return { ok: true, lines: plan.result || [plan.preview.blocked] }
+    }
+    const lines = plan.apply ? await plan.apply() : plan.result || []
+    return { ok: true, lines }
+  }
+
+  switch (name) {
+    case 'help':
+      return { ok: true, listing: consoleListing('help', CONSOLE_HELP) }
+    case 'status':
+      return { ok: true, listing: await consoleStatus() }
+    case 'library':
+      return { ok: true, listing: await consoleLibrary(flags) }
+    case 'staged':
+      return { ok: true, listing: await consoleStaged(flags) }
+    case 'removed':
+      return { ok: true, listing: await consoleRemoved(flags) }
+    case 'track':
+      return { ok: true, listing: await consoleTrack(args) }
+    case 'import':
+      return settle(await consoleImport(args, flags, previewSignal))
+    case 'merge':
+      return settle(await consoleMerge(flags))
+    case 'remove':
+      return settle(await consoleRemove(args, flags))
+    case 'restore':
+      return settle(await consoleRestore(args, flags))
+    case 'forget':
+      return settle(await consoleForget(args, flags))
+    case 'stage':
+      return settle(await consoleStage(args, flags))
+    case 'target':
+      return settle(await consoleTarget(args))
+    case 'auto':
+      return settle(await consoleAuto(args))
+    case 'login':
+      return { ok: true, lines: await consoleLogin() }
+    case 'logout':
+      return settle(await consoleLogout())
+    case 'consent':
+      return settle(await consoleConsent(args))
+    case 'prefetch':
+      return { ok: true, lines: await consolePrefetch() }
+    default:
+      throw new Error(`unknown command ${JSON.stringify(name)} — try help`)
+  }
+}
+
 async function handleMessage(message, sender) {
   switch (message?.type) {
+    case 'console-run':
+      return runConsoleCommand(message)
+    case 'console-preview':
+      return runConsoleCommand({ ...message, preview: true })
+    case 'console-header':
+      return consoleHeader()
+    case 'part-info':
+      return partInfo(message.ids)
     case 'status':
       return status()
     case 'connect':

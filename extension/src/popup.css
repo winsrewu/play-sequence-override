@@ -166,8 +166,9 @@ progress {
 
 footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 1em;
+  gap: 0.5em 1em;
   margin-top: 2em;
   color: #666;
   font-size: 0.85em;

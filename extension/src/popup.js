@@ -354,6 +354,11 @@ $('open-options').addEventListener('click', (event) => {
   chrome.runtime.openOptionsPage()
 })
 
+$('open-console').addEventListener('click', (event) => {
+  event.preventDefault()
+  chrome.tabs.create({ url: chrome.runtime.getURL('src/console.html') })
+})
+
 $('open-graph').addEventListener('click', (event) => {
   event.preventDefault()
   chrome.tabs.create({ url: chrome.runtime.getURL('src/graph.html') })

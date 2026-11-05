@@ -103,6 +103,21 @@ export async function vectorSetMany(vectors) {
   return vectors.size
 }
 
+export async function vectorDelete(ids) {
+  const list = [...new Set(ids)].filter((id) => typeof id === 'string' && id)
+  if (list.length === 0) return 0
+  const db = await openDatabase()
+  const tx = db.transaction(VECTOR_STORE, 'readwrite')
+  const store = tx.objectStore(VECTOR_STORE)
+  for (const id of list) store.delete(id)
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB vector delete aborted'))
+  })
+  return list.length
+}
+
 export async function vectorDeleteAll() {
   const db = await openDatabase()
   const tx = db.transaction(VECTOR_STORE, 'readwrite')

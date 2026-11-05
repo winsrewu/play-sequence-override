@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jawbts Console</title>
+    <link rel="stylesheet" href="console.css" />
+  </head>
+  <body>
+    <header>
+      <span class="identity">jawbts@console</span>
+      <span id="counts" class="counts"></span>
+    </header>
+
+    <main id="log" role="log" aria-live="polite" aria-label="Console output"></main>
+
+    <section id="preview" class="preview hidden" aria-label="Command preview">
+      <div class="preview-head">
+        <span class="tag">preview</span>
+        <span id="preview-title"></span>
+      </div>
+      <p id="preview-summary" class="summary"></p>
+      <ol id="preview-items" class="items"></ol>
+      <div class="toolbar">
+        <span id="preview-page" class="page"></span>
+        <button id="preview-prev" type="button">← Prev</button>
+        <button id="preview-next" type="button">Next →</button>
+        <input id="preview-search" type="search" placeholder="Search preview" aria-label="Search preview" />
+        <button id="preview-find" type="button">Find</button>
+        <button id="preview-clear" type="button">Clear</button>
+        <button id="preview-cancel" type="button">Cancel</button>
+      </div>
+    </section>
+
+    <form id="prompt" autocomplete="off">
+      <span class="prompt-sign">$</span>
+      <input
+        id="command"
+        type="text"
+        placeholder="type a command…"
+        aria-label="Console command"
+        spellcheck="false"
+        autocomplete="off"
+        autocapitalize="none"
+      />
+      <span id="status" class="status hidden" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="status-text"></span>
+      </span>
+      <button id="run" class="primary" type="submit">Run</button>
+    </form>
+
+    <script src="console.js"></script>
+  </body>
+</html>

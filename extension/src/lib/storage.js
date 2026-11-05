@@ -1,5 +1,6 @@
 import {
   kvDelete,
+  vectorDelete,
   kvGet,
   kvSet,
   vectorDeleteAll,
@@ -12,6 +13,8 @@ export const KEYS = Object.freeze({
   config: 'config',
   session: 'session',
   catalog: 'catalog',
+  staged: 'staged',
+  removed: 'removed',
   history: 'history',
   current: 'current',
   sessionPlays: 'sessionPlays',
@@ -135,6 +138,50 @@ export async function setSession(session) {
 export async function clearSession() {
   await kvDelete(KEYS.session)
   await kvDelete(KEYS.oauthState)
+}
+
+function trackRecord(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+}
+
+export async function getStagedTracks() {
+  await ensureMigrated()
+  const stored = await kvGet(KEYS.staged, {})
+  const tracks = new Map()
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return tracks
+  for (const [id, track] of Object.entries(stored)) {
+    const record = trackRecord(track)
+    if (record) tracks.set(id, record)
+  }
+  return tracks
+}
+
+export async function setStagedTracks(tracks) {
+  const record = {}
+  for (const [id, track] of tracks) record[id] = track
+  await kvSet(KEYS.staged, record)
+}
+
+export async function getRemovedTracks() {
+  await ensureMigrated()
+  const stored = await kvGet(KEYS.removed, {})
+  const removed = new Map()
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return removed
+  for (const [id, entry] of Object.entries(stored)) {
+    if (!entry || typeof entry !== 'object') continue
+    const track = trackRecord(entry.track)
+    if (!track) continue
+    removed.set(id, { track, at: typeof entry.at === 'string' ? entry.at : null })
+  }
+  return removed
+}
+
+export async function setRemovedTracks(removed) {
+  const record = {}
+  for (const [id, entry] of removed) {
+    record[id] = { track: entry.track, at: entry.at ?? new Date().toISOString() }
+  }
+  await kvSet(KEYS.removed, record)
 }
 
 export async function getCatalog() {
@@ -279,6 +326,10 @@ export async function setVectorCacheEntry(id, vector) {
 export async function setVectorCacheEntries(vectors) {
   await ensureMigrated()
   return vectorSetMany(vectors)
+}
+
+export async function deleteVectorCacheEntries(ids) {
+  return vectorDelete(ids)
 }
 
 export async function clearVectorCache() {

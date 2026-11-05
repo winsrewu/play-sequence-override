@@ -18,6 +18,14 @@ Edge / Chromium MV3 extension keeps all of that in IndexedDB and drives playback
 Install it from the Microsoft Edge Add-ons store:
 <https://microsoftedge.microsoft.com/addons/detail/oacjdflkiecoclphcfdopfoingkhbomm>
 
+The popup also opens a console (popup → Console) for staged imports from
+Bilibili video, series, collection and favourites. Imports stay in staging until
+`merge`; `remove` tombstones a track so playlists and imports hide it, `restore`
+undoes that, and `forget` erases the track, its vector, history and tombstone.
+Commands preview their effects while you type, but the preview is informational:
+Enter runs the command immediately and the output states the counts. The preview
+has buttons for paging and search only.
+
 ## Deploy
 
 Requirements: Docker with Compose, a jawbts-api instance, a jawbts-gateway

@@ -19,7 +19,6 @@ export const KEYS = Object.freeze({
   current: 'current',
   sessionPlays: 'sessionPlays',
   oauthState: 'oauthState',
-  lastDecision: 'lastDecision',
   prefetchJob: 'prefetchJob',
   tabRegistry: 'tabRegistry',
   derived: 'derived',
@@ -226,19 +225,6 @@ export async function getSessionPlays() {
 
 export async function setSessionPlays(plays) {
   await kvSet(KEYS.sessionPlays, plays)
-}
-
-export async function getLastDecision() {
-  await ensureMigrated()
-  return (await kvGet(KEYS.lastDecision, null)) || null
-}
-
-export async function setLastDecision(log) {
-  await kvSet(KEYS.lastDecision, log)
-}
-
-export async function clearLastDecision() {
-  await kvDelete(KEYS.lastDecision)
 }
 
 export async function getPrefetchJob() {

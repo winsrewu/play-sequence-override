@@ -1,11 +1,10 @@
-import { formatLyricsRatio, lanePreview, normalizeLyricsShare } from './lib/lyrics.js'
+import { formatLyricsRatio, normalizeLyricsShare } from './lib/lyrics.js'
 
 const $ = (id) => document.getElementById(id)
 
 let refreshing = false
 let refreshQueued = false
 let targetSave = Promise.resolve()
-let lastDecision = null
 let launchMode = false
 let currentLyrics = null
 
@@ -32,36 +31,12 @@ function setError(element, error) {
   element.classList.remove('hidden')
 }
 
-function renderDecision(log) {
-  lastDecision = log || null
-  const summary = $('decision-summary')
-  if (!log) {
-    summary.textContent = launchMode
-      ? 'No selection yet. Launch opens the next track in a new tab.'
-      : 'No selection yet. Press Next to produce one.'
-    return
-  }
-  const request = log.request || {}
-  const result = log.result || {}
-  const algorithm = log.algorithm || {}
-  const chosen = algorithm.chosen || {}
-  const currentTitle = request.currentTrack?.title || request.current || 'unknown'
-  const nextTitle = result.nextTrack?.title || result.nextId || 'unknown'
-  const randomValues = Array.isArray(algorithm.randomValues) ? algorithm.randomValues : []
-  const draw = randomValues.length > 0 ? randomValues[randomValues.length - 1] : null
-  const tuning = request.tuning || {}
-  const lines = [
-    `${currentTitle} → ${nextTitle}`,
-    `target ${Number(request.targetPercent ?? 0).toFixed(0)}% · pool ${algorithm.poolSize ?? 0} · sample ${algorithm.sampleSize ?? 0} · top ${(algorithm.topCandidates || []).length}`,
-    `H ${tuning.historyLength ?? '—'} · skip ${tuning.forceSkip ?? '—'} · penalty ${Number(tuning.penaltyStrength ?? 0).toFixed(2)} · curve ${Number(tuning.curve ?? 0).toFixed(2)} · sim curve ${Number(tuning.simCurve ?? 0).toFixed(2)}`,
-    `chosen rank ${chosen.rank ?? '—'} · score ${Number(chosen.score ?? 0).toExponential(4)} · similarity ${Number(chosen.normalizedSimilarity ?? 0).toFixed(4)}`,
-    `history ${Number(chosen.historyPenalty ?? 0).toFixed(4)} + style ${Number(chosen.stylePenalty ?? 0).toFixed(4)} = penalty ${Number(chosen.combinedPenalty ?? chosen.historyPenalty ?? 0).toFixed(4)}`,
-    `penalty factor ×${Number(chosen.penaltyFactor ?? chosen.historyFactor ?? 1).toFixed(4)} · plays ${chosen.plays ?? 0} · novelty ×${Number(chosen.novelty ?? 1).toFixed(4)}`,
-    draw === null
-      ? 'empty candidate pool'
-      : `uniform top-${(algorithm.topCandidates || []).length} draw ${draw.toFixed(4)} → rank ${chosen.rank ?? '—'}`,
-  ]
-  summary.textContent = lines.join('\n')
+const HISTORY_TITLE_LENGTH = 42
+
+function shortHistoryTitle(title) {
+  const value = String(title || '')
+  if (value.length <= HISTORY_TITLE_LENGTH) return value
+  return `${value.slice(0, HISTORY_TITLE_LENGTH - 1)}…`
 }
 
 function formatEta(seconds) {
@@ -130,16 +105,6 @@ function remaining(state) {
 function renderLyricsShare(share, enabled) {
   const value = normalizeLyricsShare(share)
   $('lyrics-share-value').textContent = enabled ? formatLyricsRatio(value) : 'off'
-  const pattern = lanePreview(value, 10)
-    .map((lane) => (lane === 'lyrics' ? 'L' : 'NL'))
-    .join(' ')
-  $('lyrics-share-summary').textContent = !enabled
-    ? 'Original logic: the 500 candidates come from every track.'
-    : value <= 0
-      ? 'Only instrumentals are picked.'
-      : value >= 100
-        ? 'Only tracks with lyrics are picked.'
-        : `${value}% of tracks have lyrics · ${pattern} …`
 }
 
 function renderLyricsState(lyrics) {
@@ -243,9 +208,6 @@ function render(status, tab = null) {
   $('lyrics-share').value = String(share)
   renderLyricsShare(share, lyricsEnabled)
   $('auto').checked = Boolean(status.autoAdvance)
-  $('auto-hint').textContent = status.autoAdvance
-    ? 'Auto-advance is ON at the real end of the main video.'
-    : 'Auto-advance is OFF — tracks will only change with Next.'
 
   $('library').textContent = `${status.catalogCount} tracks · ${status.embeddedCount} embedded`
   const missing = status.missingCount || 0
@@ -282,8 +244,8 @@ function render(status, tab = null) {
   for (const track of status.history || []) {
     const item = document.createElement('li')
     const strong = document.createElement('strong')
-    strong.textContent = track.title || track.id
-    item.append(strong, document.createTextNode(` · ${track.id}`))
+    strong.textContent = shortHistoryTitle(track.title || track.id)
+    item.append(strong)
     history.append(item)
   }
   if (!history.children.length) {
@@ -327,12 +289,6 @@ async function refresh() {
   await ensureContent(tab)
   try {
     render(await send({ type: 'status' }), tab)
-    try {
-      const decision = await send({ type: 'decision-log' })
-      renderDecision(decision.log)
-    } catch {
-      renderDecision(null)
-    }
   } catch (error) {
     setError($('auth-error'), error)
   } finally {
@@ -488,28 +444,6 @@ $('open-console').addEventListener('click', (event) => {
 $('open-graph').addEventListener('click', (event) => {
   event.preventDefault()
   chrome.tabs.create({ url: chrome.runtime.getURL('src/graph.html') })
-})
-
-$('decision-copy').addEventListener('click', async () => {
-  if (!lastDecision) return
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(lastDecision, null, 2))
-    $('decision-copy').textContent = 'Copied'
-    setTimeout(() => { $('decision-copy').textContent = 'Copy JSON' }, 1500)
-  } catch (error) {
-    setError($('auth-error'), error)
-  }
-})
-
-$('decision-download').addEventListener('click', () => {
-  if (!lastDecision) return
-  const blob = new Blob([JSON.stringify(lastDecision, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = `jawbts-decision-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
-  anchor.click()
-  setTimeout(() => URL.revokeObjectURL(url), 10_000)
 })
 
 chrome.runtime.onMessage.addListener((message) => {

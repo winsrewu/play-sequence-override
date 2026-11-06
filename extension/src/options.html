@@ -114,6 +114,19 @@
       </section>
 
       <section>
+        <h2>Playlist</h2>
+        <p class="muted">Export the current library as a v2 JSON file, or import one.</p>
+        <div class="actions">
+          <label class="file-button">
+            Import JSON
+            <input id="import-playlist" type="file" accept="application/json,.json" hidden />
+          </label>
+          <button id="export-v2" type="button">Export v2</button>
+        </div>
+        <p id="playlist-status" class="muted"></p>
+      </section>
+
+      <section>
         <h2>Embedding data (C format)</h2>
         <p class="muted">
           Pick the folder that holds the C <code>music_embed*.json</code> files

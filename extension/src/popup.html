@@ -26,9 +26,6 @@
       </div>
       <p id="auth-error" class="error hidden"></p>
       <p id="allowlist" class="hint"></p>
-      <p id="auth-webview-hint" class="hint">
-        Sign in opens Chrome's protected OAuth webview; the gateway returns to the extension redirect URI.
-      </p>
     </section>
 
     <section class="card">
@@ -43,29 +40,22 @@
       <div class="row actions">
         <button id="lyrics-toggle" class="ghost small" type="button" disabled>Lyrics: —</button>
       </div>
+      <div class="row checks column">
+        <label><input id="auto" type="checkbox" checked /> Auto-advance when the video ends</label>
+        <label><input id="lyrics-enabled" type="checkbox" checked /> Use the lyrics share instead of the original candidate logic</label>
+      </div>
+
       <label class="slider-label" for="target">
         <span>Target similarity</span>
         <output id="target-value">75%</output>
       </label>
       <input id="target" type="range" min="0" max="100" step="1" value="75" />
-      <p class="hint">75% matches the original C app default.</p>
 
-      <div class="row checks">
-        <label><input id="auto" type="checkbox" checked /> Auto-advance when the video ends</label>
-      </div>
-      <p id="auto-hint" class="hint"></p>
-    </section>
-
-    <section class="card">
-      <div class="row checks">
-        <label><input id="lyrics-enabled" type="checkbox" checked /> Use the lyrics share</label>
-      </div>
       <label class="slider-label" for="lyrics-share">
         <span>Lyrics share</span>
         <output id="lyrics-share-value">1 : 1</output>
       </label>
       <input id="lyrics-share" type="range" min="0" max="100" step="1" value="50" />
-      <p id="lyrics-share-summary" class="hint"></p>
     </section>
 
     <section class="card">
@@ -92,16 +82,6 @@
       <p id="library-error" class="error hidden"></p>
     </section>
 
-    <section class="card">
-      <div class="row">
-        <p class="label">Last decision</p>
-        <div class="actions">
-          <button id="decision-copy" class="ghost small" type="button">Copy JSON</button>
-          <button id="decision-download" class="ghost small" type="button">Download</button>
-        </div>
-      </div>
-      <p id="decision-summary" class="hint">No selection yet.</p>
-    </section>
 
     <section class="card">
       <p class="label">Recent</p>

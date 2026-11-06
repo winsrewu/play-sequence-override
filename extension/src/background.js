@@ -465,7 +465,7 @@ async function status() {
       at: entry.at,
     })),
     current: trackMeta(byId.get(currentId)),
-    history: history.slice(0, 10).map((id) => trackMeta(byId.get(id))).filter(Boolean),
+    history: history.slice(0, 5).map((id) => trackMeta(byId.get(id))).filter(Boolean),
     targetSimilarity: config.targetSimilarity,
     autoAdvance: config.autoAdvance,
     softNavigation: config.softNavigation,
@@ -778,7 +778,6 @@ async function selectNext({
       lyrics: lyricsMeta,
     }
     console.info('[jawbts] next-track decision', lastDecision)
-    await store.setLastDecision(lastDecision).catch(() => {})
     throw new Error(
       config.lyricsEnabled
         ? 'No eligible next track; unclassified tracks are skipped while the lyrics share is on.'
@@ -809,7 +808,6 @@ async function selectNext({
     lyrics: lyricsMeta,
   }
   console.info('[jawbts] next-track decision', lastDecision)
-  await store.setLastDecision(lastDecision).catch(() => {})
 
   if (newTab) await adoptTab(await chrome.tabs.create({ url: trackUrl(track) }), track.id)
   else await navigate(tabId, track, config.softNavigation)
@@ -1536,6 +1534,8 @@ let previewController = null
 const CONSOLE_HELP = [
   'help                                     this list',
   'status                                   library, staging, session and consent',
+  'history [count]                          recent plays (default 20)',
+  'history remove <id|index...>             drop plays from the history',
   'library [--filter=text]                  list the catalog',
   'staged [--filter=text]                   list the staging space',
   'removed [--filter=text]                  list tombstones',
@@ -1669,6 +1669,69 @@ async function consoleRemoved(flags) {
     }),
   )
   return consoleListing('removed', consoleFilter(items, flags))
+}
+
+async function consoleHistory(args) {
+  const sub = String(args[0] || '').toLowerCase()
+  if (sub === 'remove') {
+    const [catalog, history] = await Promise.all([ensureCatalog(), store.getHistory()])
+    const byId = new Map(catalog.tracks.map((track) => [track.id, track]))
+    const remove = new Set()
+    for (const value of args.slice(1)) {
+      const index = Number.parseInt(value, 10)
+      if (/^\d+$/.test(value)) {
+        if (index < 1 || index > history.length) {
+          throw new Error(`history index ${value} is out of range`)
+        }
+        remove.add(history[index - 1])
+      } else {
+        for (const id of consoleIds([value])) remove.add(id)
+      }
+    }
+    if (remove.size === 0) throw new Error('give at least one history id or index')
+    const removed = history.filter((id) => remove.has(id))
+    return {
+      preview: {
+        title: 'history remove',
+        summary: `remove ${removed.length} of ${history.length} play(s)`,
+        items: removed.slice(0, 12).map((id) => ({
+          text: byId.get(id)?.title || id,
+        })),
+        destructive: true,
+      },
+      apply: async () => {
+        const next = history.filter((id) => !remove.has(id))
+        const plays = await store.getSessionPlays()
+        let playsChanged = false
+        for (const id of remove) {
+          if (Object.prototype.hasOwnProperty.call(plays, id)) {
+            delete plays[id]
+            playsChanged = true
+          }
+        }
+        await store.setHistory(next)
+        if (playsChanged) await store.setSessionPlays(plays)
+        broadcast({ type: 'data-changed', kind: 'history' })
+        return [`removed ${removed.length} history entr${removed.length === 1 ? 'y' : 'ies'}`]
+      },
+    }
+  }
+
+  const requested = Number.parseInt(String(args[0] ?? ''), 10)
+  const limit = Number.isFinite(requested) && requested > 0
+    ? Math.min(requested, 500)
+    : 20
+  const [catalog, history] = await Promise.all([ensureCatalog(), store.getHistory()])
+  if (history.length === 0) return { lines: ['history is empty'] }
+  const byId = new Map(catalog.tracks.map((track) => [track.id, track]))
+  return {
+    lines: history.slice(0, limit).map((id, index) => {
+      const track = byId.get(id)
+      const title = track?.title || id
+      const page = track?.page ? ` · p${track.page}` : ''
+      return `${String(index + 1).padStart(3)}. ${title}${page} (${id})`
+    }),
+  }
 }
 
 async function consoleTrack(args) {
@@ -1868,8 +1931,6 @@ async function consoleRemove(args, flags) {
       if (current && ids.includes(current)) await store.setCurrent(null)
       const history = await store.getHistory()
       await store.setHistory(history.filter((id) => !ids.includes(id)))
-      lastDecision = null
-      await store.clearLastDecision().catch(() => {})
       invalidateCachedEmbeddings()
       invalidateRecommender()
       broadcast({ type: 'data-changed', kind: 'catalog' })
@@ -1978,8 +2039,6 @@ async function consoleForget(args, flags) {
       if (playsChanged) await store.setSessionPlays(plays)
       const current = await store.getCurrent()
       if (current && ids.includes(current)) await store.setCurrent(null)
-      lastDecision = null
-      await store.clearLastDecision().catch(() => {})
       invalidateCachedEmbeddings()
       invalidateRecommender()
       broadcast({ type: 'data-changed', kind: 'catalog' })
@@ -2047,8 +2106,6 @@ async function consoleRemoveUnavailable(flags) {
       await store.setHistory(history.filter((id) => !ids.includes(id)))
       const current = await store.getCurrent()
       if (current && ids.includes(current)) await store.setCurrent(null)
-      lastDecision = null
-      await store.clearLastDecision().catch(() => {})
       invalidateCachedEmbeddings()
       invalidateRecommender()
       broadcast({ type: 'data-changed', kind: 'catalog' })
@@ -2461,6 +2518,10 @@ async function runConsoleCommand(message) {
       return { ok: true, listing: consoleListing('help', CONSOLE_HELP) }
     case 'status':
       return { ok: true, listing: await consoleStatus() }
+    case 'history': {
+      const plan = await consoleHistory(args)
+      return plan.preview ? settle(plan) : { ok: true, lines: plan.lines }
+    }
     case 'library':
       return { ok: true, listing: await consoleLibrary(flags) }
     case 'staged':
@@ -2559,9 +2620,6 @@ async function handleMessage(message, sender) {
       return launch({ targetSimilarity: message.targetSimilarity })
     case 'graph-data':
       return graphData(message.targetSimilarity, message.tuning || null)
-    case 'decision-log':
-      if (!lastDecision) lastDecision = await store.getLastDecision()
-      return { ok: true, log: lastDecision }
     case 'ensure-prefetch':
       return { ok: true, prefetch: prefetchState }
     case 'unavailable-list': {
@@ -2621,10 +2679,6 @@ async function handleMessage(message, sender) {
     }
     case 'prefetch-state':
       return { ok: true, prefetch: prefetchState }
-    case 'clear-decision-log':
-      lastDecision = null
-      await store.clearLastDecision()
-      return { ok: true }
     case 'play-id': {
       const owner = await ownerTabEntry()
       return playTrack(message.id, message.tabId ?? owner?.tabId ?? null)

@@ -121,6 +121,7 @@ input[type="range"] {
 }
 
 .checks { justify-content: flex-start; margin-top: 0.8em; }
+.checks.column { flex-direction: column; align-items: flex-start; gap: 0.35em; }
 .checks label {
   display: flex;
   align-items: baseline;
@@ -150,18 +151,13 @@ progress {
   accent-color: #07a;
 }
 
-#decision-summary {
-  white-space: pre-line;
-  overflow-wrap: anywhere;
-}
-
 .history {
   margin: 0.4em 0 0;
   padding-left: 1.4em;
   color: #666;
   font-size: 0.85em;
 }
-.history li { margin: 0.2em 0; overflow-wrap: anywhere; }
+.history li { margin: 0.2em 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .history li strong { color: #454545; font-weight: 600; }
 
 footer {

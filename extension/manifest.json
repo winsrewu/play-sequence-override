@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jawbts Play Sequence Override",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApa4hnQ29yFN9Q4gyYf7IeTVu8fjDlRMxFcQEpt/jJ3hwW7WC8kdJBm4nHD8MMvdF7Ocm3938TwZcv1Kyh6OFx9w5bUj8HPN2ETvNJAyXfCwsvvMpXnIj40QXwk51lpHHcNfz9kLznsaWtCeap37ytThh27MwoXZJm1OkscWVeykQvfGYFBfE8HAt61HRuHalMsuLLthKF8RbRMF+/L0MX+6ACpoAaCpdlmDsqI7ihASIu0z0DfKT7D3qI3DQpGXvKLQUXWh2pjqrLLFRhexkUoKexrisHrKMv7PNsF2V4lccQYUtzN5nMOtf3Z7sS1TlVbthuQwkdb0EHMk8V7iLAwIDAQAB",
   "description": "OAuth2-connected Bilibili playback that picks the next track from a Jawbts audio-embedding playlist.",
   "minimum_chrome_version": "109",

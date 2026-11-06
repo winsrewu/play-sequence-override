@@ -1686,7 +1686,7 @@ const CONSOLE_HELP = [
   'remove <id...>                           tombstone: hidden from playlists and imports',
   'restore <id...>                          undo a tombstone, return to catalog',
   'forget <id...>                           erase track, vector, history and tombstone',
-  'remove-unavailable                        tombstone every marked unavailable track',
+  'remove-unavailable                       tombstone every marked unavailable track',
   'clear                                    clear this transcript',
 ]
 

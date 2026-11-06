@@ -11,7 +11,6 @@ import {
   lanePreview,
   lyricsCounts,
   normalizeLyricsShare,
-  parseLyricsRatio,
   shareWeights,
 } from '../src/lib/lyrics.js'
 
@@ -36,20 +35,6 @@ test('the displayed ratio reaches 0 and +inf', () => {
   assert.equal(formatLyricsRatio(0), '0 : 1 (all instrumentals)')
   assert.equal(formatLyricsRatio(100), '1 : 0 (all lyrics)')
   assert.equal(formatLyricsRatio(66.67), '1 : 0.5')
-})
-
-test('parsing accepts ratios, infinity, percentages and the old form', () => {
-  assert.equal(parseLyricsRatio('1:1.5'), 40)
-  assert.equal(parseLyricsRatio('2:3'), 40)
-  assert.equal(parseLyricsRatio('1:0'), 100)
-  assert.equal(parseLyricsRatio('0:1'), 0)
-  assert.equal(parseLyricsRatio('1:inf'), 0)
-  assert.equal(parseLyricsRatio('1:∞'), 0)
-  assert.equal(parseLyricsRatio('40%'), 40)
-  assert.equal(parseLyricsRatio('0.5'), 66.67)
-  assert.throws(() => parseLyricsRatio('0:0'), /at least one side/)
-  assert.throws(() => parseLyricsRatio('nope'), /ratio/)
-  assert.throws(() => parseLyricsRatio('140%'), /between 0 and 100/)
 })
 
 test('1:1 alternates lyrics and instrumentals', () => {

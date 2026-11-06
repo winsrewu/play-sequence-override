@@ -32,44 +32,12 @@ function trimNumber(value) {
 }
 
 // The lyrics side is fixed at 1 for mixed settings, which is the notation the
-// settings page and the console use.
+// settings page and popup use.
 export function formatLyricsRatio(share) {
   const value = normalizeLyricsShare(share)
   if (value <= LYRICS_SHARE_MIN) return '0 : 1 (all instrumentals)'
   if (value >= LYRICS_SHARE_MAX) return '1 : 0 (all lyrics)'
   return `1 : ${trimNumber((100 - value) / value)}`
-}
-
-// Accepts "1:1.5", "0:1", "1:0", "1:inf", "40%" and the old plain 1:x number.
-// Returns a share in percent, never an infinity.
-export function parseLyricsRatio(text) {
-  const raw = String(text ?? '').trim()
-  if (raw.endsWith('%')) {
-    const percent = Number(raw.slice(0, -1))
-    if (!Number.isFinite(percent) || percent < LYRICS_SHARE_MIN || percent > LYRICS_SHARE_MAX) {
-      throw new Error('percentage must be between 0 and 100')
-    }
-    return normalizeLyricsShare(percent)
-  }
-
-  const pair = raw.match(/^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?|inf|∞)$/i)
-  let share
-  if (pair) {
-    const lyrics = Number(pair[1])
-    const instrumental = /^(inf|∞)$/i.test(pair[2]) ? Infinity : Number(pair[2])
-    if (lyrics + instrumental <= 0) {
-      throw new Error('at least one side of the ratio must be positive')
-    }
-    share = instrumental === Infinity ? 0 : (100 * lyrics) / (lyrics + instrumental)
-    return normalizeLyricsShare(share)
-  }
-
-  // A plain number is the old form: instrumental tracks per lyrics track.
-  const ratio = Number(raw)
-  if (!Number.isFinite(ratio) || ratio < 0) {
-    throw new Error('ratio must look like 1:1.5, 0:1, 1:0 or a percentage such as 40%')
-  }
-  return normalizeLyricsShare(100 / (1 + ratio))
 }
 
 const weightsCache = new Map()

@@ -19,13 +19,10 @@ import {
   LANE_INSTRUMENTAL,
   LANE_LYRICS,
   LYRICS_THRESHOLD_DEFAULT,
-  formatLyricsRatio,
   laneAt,
   laneCandidates,
-  lanePreview,
   lyricsCounts,
   normalizeLyricsShare,
-  parseLyricsRatio,
 } from './lib/lyrics.js'
 import { parseLyricsText } from './lib/lyrics-json.js'
 import { analyzeVocalsBatch, embedTrack, embedTrackBatch } from './lib/embed-api.js'
@@ -1690,15 +1687,6 @@ const CONSOLE_HELP = [
   'restore <id...>                          undo a tombstone, return to catalog',
   'forget <id...>                           erase track, vector, history and tombstone',
   'remove-unavailable                        tombstone every marked unavailable track',
-  'target <0-100>                           set target similarity',
-  'auto on|off                              toggle auto advance',
-  'login | logout                           manage the account session',
-  'consent grant|revoke                     allow or revoke remote service calls',
-  'prefetch                                 fetch missing vectors',
-  'lyrics [status]                          share, verdict counts and progress',
-  'lyrics mix on|off                        enable or disable the lyrics share',
-  'lyrics ratio <1:x|percent>               mix: 1:1.5, 0:1, 1:0 or 40%',
-  'lyrics on|off [id...]                    mark tracks (default: the current one)',
   'clear                                    clear this transcript',
 ]
 
@@ -2335,227 +2323,6 @@ async function consoleStage(args, flags) {
   }
 }
 
-async function consoleTarget(args) {
-  const value = Number(args[0])
-  if (!Number.isInteger(value) || value < 0 || value > 100) throw new Error('usage: target <0-100>')
-  const config = await getConfig()
-  return {
-    preview: {
-      title: 'target',
-      summary: `${config.targetSimilarity}% → ${value}%`,
-      items: [{ text: `targetSimilarity ${config.targetSimilarity} → ${value}` }],
-      destructive: false,
-    },
-    apply: async () => {
-      await setConfig({ ...config, targetSimilarity: value })
-      broadcast({ type: 'data-changed', kind: 'config' })
-      return [`target similarity ${value}%`]
-    },
-  }
-}
-
-async function consoleAuto(args) {
-  const action = String(args[0] || '').toLowerCase()
-  if (!['on', 'off'].includes(action)) throw new Error('usage: auto on|off')
-  const config = await getConfig()
-  const value = action === 'on'
-  return {
-    preview: {
-      title: 'auto',
-      summary: `auto advance ${config.autoAdvance ? 'on' : 'off'} → ${value ? 'on' : 'off'}`,
-      items: [{ text: `autoAdvance ${config.autoAdvance} → ${value}` }],
-      destructive: false,
-    },
-    apply: async () => {
-      await setConfig({ ...config, autoAdvance: value })
-      broadcast({ type: 'data-changed', kind: 'config' })
-      return [`auto advance ${value ? 'on' : 'off'}`]
-    },
-  }
-}
-
-async function consoleLogin() {
-  await requireRemoteConsent()
-  const session = await authConnect()
-  startVectorFetch().catch(() => {})
-  startLyricsFetch().catch(() => {})
-  return [`signed in${session?.devMode ? ' (dev mode)' : ''}`]
-}
-
-async function consoleLogout() {
-  return {
-    preview: {
-      title: 'logout',
-      summary: 'clear the stored session',
-      items: [{ text: 'vector fetching stops until you sign in again' }],
-      destructive: true,
-    },
-    apply: async () => {
-      await authDisconnect()
-      return ['signed out']
-    },
-  }
-}
-
-async function consoleConsent(args) {
-  const action = String(args[0] || '').toLowerCase()
-  if (!['grant', 'revoke'].includes(action)) throw new Error('usage: consent grant|revoke')
-  const config = await getConfig()
-  const origins = remoteOrigins(config)
-  if (action === 'grant') {
-    return {
-      preview: {
-        title: 'consent grant',
-        summary: `allow request data to ${origins.join(', ') || 'no remote services'}`,
-        items: origins.map((origin) => ({ text: origin })),
-        destructive: false,
-      },
-      apply: async () => {
-        await store.setConsent({ granted: true, at: new Date().toISOString(), origins })
-        broadcast({ type: 'data-changed', kind: 'consent' })
-        return ['consent granted']
-      },
-    }
-  }
-  return {
-    preview: {
-      title: 'consent revoke',
-      summary: 'stop contacting remote services',
-      items: origins.map((origin) => ({ text: origin })),
-      destructive: true,
-    },
-    apply: async () => {
-      await store.clearConsent()
-      broadcast({ type: 'data-changed', kind: 'consent' })
-      return ['consent revoked']
-    },
-  }
-}
-
-async function consolePrefetch() {
-  const result = await prefetch()
-  return [`prefetch ${result.done ?? 0}/${result.total ?? 0}`]
-}
-
-function lyricsPatternText(share, length = 10) {
-  return lanePreview(share, length)
-    .map((lane) => (lane === LANE_LYRICS ? 'L' : 'NL'))
-    .join(' ')
-}
-
-async function consoleLyrics(args) {
-  const sub = String(args[0] || 'status').toLowerCase()
-  if (!['status', 'mix', 'ratio', 'on', 'off'].includes(sub)) {
-    throw new Error('usage: lyrics [status|mix on|off|ratio <1:x|percent>|on|off [id...]]')
-  }
-  const config = await getConfig()
-
-  if (sub === 'ratio') {
-    if (args.length < 2) throw new Error('usage: lyrics ratio <1:x|percent>')
-    const value = parseLyricsRatio(args[1])
-    const previous = config.lyricsShare
-    return {
-      preview: {
-        title: 'lyrics ratio',
-        summary: `${formatLyricsRatio(previous)} → ${formatLyricsRatio(value)}`,
-        items: [{ text: `pattern ${lyricsPatternText(value)}` }],
-        destructive: false,
-      },
-      apply: async () => {
-        await setConfig({ ...config, lyricsShare: value })
-        await store.setLyricsCursor({ share: value, index: 0 })
-        broadcast({ type: 'data-changed', kind: 'config' })
-        return [`lyrics ratio ${formatLyricsRatio(value)}`, `pattern ${lyricsPatternText(value)}`]
-      },
-    }
-  }
-
-  if (sub === 'mix') {
-    const action = String(args[1] || '').toLowerCase()
-    if (!['on', 'off'].includes(action)) throw new Error('usage: lyrics mix on|off')
-    const value = action === 'on'
-    return {
-      preview: {
-        title: `lyrics mix ${action}`,
-        summary: `lyrics share ${config.lyricsEnabled ? 'on' : 'off'} → ${value ? 'on' : 'off'}`,
-        items: [
-          {
-            text: value
-              ? 'the 500 candidates are drawn from the matching lane only'
-              : 'the 500 candidates come from every track',
-          },
-        ],
-        destructive: false,
-      },
-      apply: async () => {
-        await setConfig({ ...config, lyricsEnabled: value })
-        broadcast({ type: 'data-changed', kind: 'config' })
-        if (value) startLyricsFetch().catch(() => {})
-        return [`lyrics share ${value ? 'on' : 'off'}`]
-      },
-    }
-  }
-
-  if (sub === 'on' || sub === 'off') {
-    const wanted = sub === 'on'
-    const ids =
-      args.length > 1
-        ? consoleIds(args.slice(1))
-        : [await store.getCurrent()].filter(Boolean)
-    if (ids.length === 0) throw new Error('give a track id or play a track first')
-    const lyrics = await store.getLyrics()
-    const items = ids.map((id) => {
-      const entry = lyrics.get(id)
-      const previous = entry ? (entry.lyrics ? 'lyrics' : 'instrumental') : 'unknown'
-      return { text: `${id}  ${previous} → ${wanted ? 'lyrics' : 'instrumental'}` }
-    })
-    return {
-      preview: {
-        title: `lyrics ${sub}`,
-        summary: `${ids.length} track${ids.length === 1 ? '' : 's'} set to ${wanted ? 'lyrics' : 'instrumental'}`,
-        items,
-        destructive: true,
-      },
-      apply: async () => {
-        const at = new Date().toISOString()
-        const updates = new Map(
-          ids.map((id) => [
-            id,
-            { lyrics: wanted, confidence: null, source: 'manual', at },
-          ]),
-        )
-        await store.mergeLyrics(updates)
-        broadcast({ type: 'data-changed', kind: 'lyrics' })
-        return [
-          `${ids.length} track${ids.length === 1 ? '' : 's'} set to ${wanted ? 'lyrics' : 'instrumental'}`,
-        ]
-      },
-    }
-  }
-
-  const [catalog, lyrics, currentId] = await Promise.all([
-    ensureCatalog(),
-    store.getLyrics(),
-    store.getCurrent(),
-  ])
-  const counts = lyricsCounts(lyrics, catalog.tracks.map((track) => track.id))
-  const current = currentId ? lyrics.get(currentId) || null : null
-  const job = lyricsProgress()
-  const items = [
-    `mix       ${config.lyricsEnabled ? 'on' : 'off'} · ${formatLyricsRatio(config.lyricsShare)}  ${lyricsPatternText(config.lyricsShare)}`,
-    `tracks    ${counts.tracks} · ${counts.withLyrics} with lyrics · ${counts.withoutLyrics} without · ${counts.unknown} unknown`,
-    currentId
-      ? `current   ${currentId} · ${current ? (current.lyrics ? 'lyrics' : 'instrumental') : 'unknown'}${current?.source === 'manual' ? ' (manual)' : ''}`
-      : 'current   nothing recorded',
-    job.running
-      ? `progress  ${job.done}/${job.total}${job.remaining ? ` · ${job.remaining} left` : ''}${job.failed ? ` · ${job.failed} failed` : ''}`
-      : counts.unknown > 0
-        ? 'progress  idle — fetching automatically'
-        : 'progress  complete',
-  ]
-  return consoleListing('lyrics', items)
-}
-
 const partInfoCache = new Map()
 const PART_INFO_TTL = 10 * 60 * 1000
 const PART_INFO_FAIL_TTL = 60 * 1000
@@ -2684,20 +2451,6 @@ async function runConsoleCommand(message) {
       return settle(await consoleRemoveUnavailable(flags))
     case 'stage':
       return settle(await consoleStage(args, flags))
-    case 'target':
-      return settle(await consoleTarget(args))
-    case 'auto':
-      return settle(await consoleAuto(args))
-    case 'login':
-      return { ok: true, lines: await consoleLogin() }
-    case 'logout':
-      return settle(await consoleLogout())
-    case 'consent':
-      return settle(await consoleConsent(args))
-    case 'prefetch':
-      return { ok: true, lines: await consolePrefetch() }
-    case 'lyrics':
-      return settle(await consoleLyrics(args, flags))
     default:
       throw new Error(`unknown command ${JSON.stringify(name)} — try help`)
   }
@@ -2885,7 +2638,6 @@ async function handleMessage(message, sender) {
       broadcast({ type: 'data-changed', kind: 'embeddings' })
       startVectorFetch().catch(() => {})
       return { ok: true }
-    case 'prefetch':
       return prefetch()
     case 'set-lyrics': {
       const id =

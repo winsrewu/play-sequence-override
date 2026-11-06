@@ -17,10 +17,6 @@ playback.
 Install it from the Microsoft Edge Add-ons store:
 <https://microsoftedge.microsoft.com/addons/detail/oacjdflkiecoclphcfdopfoingkhbomm>
 
-> **The plugin is still unstable.**
-> For the latest updates, use the zip published in
-> [Releases](https://github.com/winsrewu/play-sequence-override/releases/latest).
-
 ## Deploy
 
 Requirements: Docker with Compose, a jawbts-api instance, a jawbts-gateway

@@ -6,11 +6,14 @@ import {
 } from './lib/config.js'
 import {
   getConfig,
+  getLyrics,
   getVectorCache,
   setConfig,
   setVectorCacheEntries,
 } from './lib/storage.js'
 import { EMBEDDING_DIM } from './lib/embedding-json.js'
+import { formatLyricsRatio, lanePreview, normalizeLyricsShare } from './lib/lyrics.js'
+import { serializeLyrics } from './lib/lyrics-json.js'
 import { parseVectors, serializeVectors } from './lib/vector-json.js'
 
 const $ = (id) => document.getElementById(id)
@@ -32,6 +35,8 @@ function readForm() {
     curve: Number($('curve').value),
     similarityCurve: Number($('similarity-curve').value),
     forceSkip: Number($('force-skip').value),
+    lyricsShare: Number($('lyrics-share').value),
+    lyricsEnabled: $('lyrics-enabled').checked,
     autoAdvance: $('auto').checked,
     softNavigation: $('soft-nav').checked,
     devMode: $('dev-mode').checked,
@@ -58,6 +63,9 @@ function fillForm(config) {
   $('curve').value = String(config.curve)
   $('similarity-curve').value = String(config.similarityCurve)
   $('force-skip').value = String(config.forceSkip)
+  $('lyrics-enabled').checked = Boolean(config.lyricsEnabled)
+  $('lyrics-share').value = String(config.lyricsShare)
+  renderLyricsShare(config.lyricsShare, config.lyricsEnabled)
   $('auto').checked = Boolean(config.autoAdvance)
   $('soft-nav').checked = Boolean(config.softNavigation)
   $('dev-mode').checked = Boolean(config.devMode)
@@ -111,6 +119,7 @@ async function load() {
   renderMeta(config)
   await refreshConsent()
   await refreshUnavailable()
+  await refreshLyrics()
   try {
     chrome.runtime
       .sendMessage({ type: 'ensure-prefetch' })
@@ -207,8 +216,14 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'prefetch-progress') {
     renderPrefetchState(message)
   }
+  if (message?.type === 'lyrics-progress') {
+    if (message.counts) renderLyricsCounts(message.counts)
+    renderLyricsProgress(message)
+    return
+  }
   if (message?.type === 'data-changed') {
     refreshUnavailable().catch(() => {})
+    if (message.kind === 'lyrics') refreshLyrics().catch(() => {})
   }
 })
 
@@ -256,6 +271,75 @@ function renderPrefetchState(state) {
     (state.remaining ? ` · ${state.remaining} remaining` : '') +
     eta +
     (state.running && !eta ? ' · estimating…' : '')
+}
+
+function renderLyricsShare(share, enabled = true) {
+  const value = normalizeLyricsShare(share)
+  $('lyrics-share').disabled = !enabled
+  $('lyrics-share-value').textContent = enabled ? formatLyricsRatio(value) : 'off'
+  const pattern = lanePreview(value, 10)
+    .map((lane) => (lane === 'lyrics' ? 'L' : 'NL'))
+    .join(' ')
+  $('lyrics-share-hint').textContent = !enabled
+    ? 'Original logic: the 500 candidates come from every track.'
+    : value <= 0
+      ? 'Only instrumentals are picked; the pattern adapts when none is left.'
+      : value >= 100
+        ? 'Only tracks with lyrics are picked; the pattern adapts when none is left.'
+        : `${value}% of tracks have lyrics · ${pattern} …`
+}
+
+async function refreshLyrics() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'status' })
+    if (!response?.ok) return
+    renderLyrics(response.lyrics || {})
+  } catch (error) {
+    $('lyrics-status').textContent = error?.message || String(error)
+  }
+}
+
+function renderLyricsCounts(lyrics) {
+  $('lyrics-counts').textContent =
+    `${lyrics.tracks || 0} tracks · ${lyrics.withLyrics || 0} with lyrics · ` +
+    `${lyrics.withoutLyrics || 0} without · ${lyrics.unknown || 0} unknown`
+}
+
+function renderLyrics(lyrics) {
+  const job = lyrics.job || null
+  const progress = $('lyrics-progress')
+  renderLyricsCounts(lyrics)
+  if (job?.running) {
+    renderLyricsProgress(job)
+    return
+  }
+  progress.classList.add('hidden')
+  if (job?.waitingConsent) {
+    $('lyrics-status').textContent =
+      'Cross-border transfer consent required in Settings & allowlist; lyric detection is disabled.'
+  } else if (job?.waitingAuth) {
+    $('lyrics-status').textContent =
+      'Sign in from the popup to fetch missing lyrics automatically.'
+  } else if ((lyrics.unknown || 0) > 0) {
+    $('lyrics-status').textContent =
+      `${lyrics.unknown} track(s) need a lyrics verdict; fetching automatically when connected.`
+  } else {
+    $('lyrics-status').textContent =
+      `All tracks have a lyrics verdict · ${formatLyricsRatio(lyrics.share)}` +
+      (lyrics.enabled ? '.' : ' · share off.')
+  }
+}
+
+function renderLyricsProgress(job) {
+  if (!job?.running) return
+  const progress = $('lyrics-progress')
+  progress.classList.remove('hidden')
+  progress.max = Math.max(1, job.total)
+  progress.value = Math.min(job.total, job.done)
+  $('lyrics-status').textContent =
+    `Detecting ${job.done}/${job.total}` +
+    (job.remaining ? ` · ${job.remaining} left` : '') +
+    formatEta(job.etaSeconds)
 }
 
 async function importEmbeddingFiles(files) {
@@ -344,6 +428,83 @@ $('import-vectors').addEventListener('change', async (event) => {
       `Imported ${count} vectors (${parsed.dim} dimensions).`
   } catch (error) {
     $('vector-transfer-status').textContent = error?.message || String(error)
+  }
+})
+
+$('lyrics-share').addEventListener('input', (event) => {
+  renderLyricsShare(event.target.value, $('lyrics-enabled').checked)
+})
+
+$('lyrics-enabled').addEventListener('change', async (event) => {
+  try {
+    const current = await getConfig()
+    const config = await setConfig({
+      ...current,
+      lyricsEnabled: event.target.checked,
+    })
+    $('lyrics-enabled').checked = config.lyricsEnabled
+    renderLyricsShare(config.lyricsShare, config.lyricsEnabled)
+    setStatus(
+      config.lyricsEnabled
+        ? 'Lyrics share on; candidates come from the matching lane.'
+        : 'Lyrics share off; candidates come from every track.',
+      'ok',
+    )
+    await refreshLyrics()
+  } catch (error) {
+    setStatus(error.message, 'bad')
+  }
+})
+
+// The slider has no Save button of its own: persist it on release so playback
+// follows the visible pattern immediately.
+$('lyrics-share').addEventListener('change', async (event) => {
+  try {
+    const current = await getConfig()
+    const config = await setConfig({
+      ...current,
+      lyricsShare: Number(event.target.value),
+    })
+    renderLyricsShare(config.lyricsShare)
+    setStatus(`Lyrics share saved as ${formatLyricsRatio(config.lyricsShare)}.`, 'ok')
+    await refreshLyrics()
+  } catch (error) {
+    setStatus(error.message, 'bad')
+  }
+})
+
+$('export-lyrics').addEventListener('click', async (event) => {
+  const button = event.currentTarget
+  button.disabled = true
+  $('lyrics-transfer-status').textContent = 'Exporting…'
+  try {
+    const entries = await getLyrics()
+    const { text, count } = serializeLyrics(entries)
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    downloadText(text, `jawbts-lyrics-${stamp}.json`)
+    $('lyrics-transfer-status').textContent = `Exported ${count} verdicts.`
+  } catch (error) {
+    $('lyrics-transfer-status').textContent = error?.message || String(error)
+  } finally {
+    button.disabled = false
+  }
+})
+
+$('import-lyrics').addEventListener('change', async (event) => {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  $('lyrics-transfer-status').textContent = 'Importing…'
+  try {
+    const text = await file.text()
+    const response = await chrome.runtime.sendMessage({ type: 'import-lyrics', text })
+    if (!response?.ok) throw new Error(response?.error?.message || 'Import failed')
+    $('lyrics-transfer-status').textContent =
+      `Imported ${response.count} verdicts` +
+      (response.ignored ? ` · ignored ${response.ignored} without a playlist track.` : '.')
+    await refreshLyrics()
+  } catch (error) {
+    $('lyrics-transfer-status').textContent = error?.message || String(error)
   }
 })
 

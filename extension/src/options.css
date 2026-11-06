@@ -141,6 +141,29 @@ progress {
 }
 .file-button:hover { background: #e4e4e4; }
 
+.hint {
+  margin: 0.3em 0 1em;
+  color: #666;
+  font-size: 0.9em;
+}
+
+label.range > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 1em;
+}
+
+label.range output {
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+input[type="range"] {
+  width: 100%;
+  margin-top: 0.4em;
+  accent-color: #07a;
+}
+
 .hidden { display: none; }
 
 
@@ -148,7 +171,7 @@ progress {
   :root { color-scheme: dark; }
   body { background: #000; color: #d9d9d9; }
   h1, h2, label, .muted, dt, .status { color: #d9d9d9; }
-  dt, .muted { color: #b8b8b8; }
+  dt, .muted, .hint { color: #b8b8b8; }
   a, button, .file-button { color: #00a2e7; }
   button:hover, .file-button:hover { color: #ca1a70; }
   input[type="url"], input[type="text"], input[type="number"] {

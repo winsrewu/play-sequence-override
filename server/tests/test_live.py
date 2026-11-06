@@ -72,6 +72,7 @@ def test_live_embedding_matches_precomputed_vector() -> None:
         catalog_strict=False,
         model_path=ROOT / "assets" / "mn10_as_mAP_471.pt",
         efficientat_path=ROOT / "vendor" / "EfficientAT",
+        vocals_model_path=ROOT / "assets" / "fireredvad" / "AED",
         ffmpeg_bin=imageio_ffmpeg.get_ffmpeg_exe(),
         max_duration_seconds=900,
     )

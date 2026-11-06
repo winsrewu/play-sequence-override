@@ -1,4 +1,6 @@
 // OAuth callback host <extension-id>.chromiumapp.org must be in the gateway allowlist.
+import { LYRICS_SHARE_DEFAULT, normalizeLyricsShare } from './lyrics.js'
+
 export const DEFAULT_CONFIG = Object.freeze({
   apiBaseUrl: 'https://api.jawbts.org',
   gatewayAuthorizeUrl: 'https://gateway.jawbts.org/authorize',
@@ -10,6 +12,9 @@ export const DEFAULT_CONFIG = Object.freeze({
   curve: 0.5,
   similarityCurve: 0.5,
   forceSkip: 1767,
+  // Percent of tracks with lyrics; 0 and 100 are the pure modes.
+  lyricsShare: LYRICS_SHARE_DEFAULT,
+  lyricsEnabled: true,
   autoAdvance: true,
   softNavigation: true,
   devMode: false,
@@ -67,6 +72,13 @@ export function normalizeConfig(raw = {}) {
   if (!Number.isFinite(forceSkip) || forceSkip < 0 || forceSkip > 1767) {
     throw new Error('forceSkip must be between 0 and 1767')
   }
+  // Before the share existed the setting was instrumentals per lyrics track.
+  const legacyRatio = raw && typeof raw === 'object' ? raw.lyricsRatio : undefined
+  let share = merged.lyricsShare
+  if (legacyRatio !== undefined && (raw == null || raw.lyricsShare === undefined)) {
+    const ratio = Number(legacyRatio)
+    share = Number.isFinite(ratio) && ratio >= 0 ? 100 / (1 + ratio) : LYRICS_SHARE_DEFAULT
+  }
   const config = {
     apiBaseUrl: normalizeBaseUrl(merged.apiBaseUrl, 'apiBaseUrl'),
     gatewayAuthorizeUrl: normalizeAuthorizeUrl(merged.gatewayAuthorizeUrl),
@@ -78,6 +90,8 @@ export function normalizeConfig(raw = {}) {
     curve,
     similarityCurve,
     forceSkip: Math.round(forceSkip),
+    lyricsShare: normalizeLyricsShare(share),
+    lyricsEnabled: Boolean(merged.lyricsEnabled),
     autoAdvance: Boolean(merged.autoAdvance),
     softNavigation: Boolean(merged.softNavigation),
     devMode: Boolean(merged.devMode),

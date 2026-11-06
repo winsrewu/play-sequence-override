@@ -8,3 +8,7 @@ pydantic==2.14.1
 numpy==2.5.4
 librosa==1.0.0
 soundfile==0.14.0
+# FireRedVAD is installed separately with --no-deps by the Dockerfile: its
+# declared textgrid dependency only powers TextGrid export and does not build.
+kaldiio==2.18.1
+kaldi-native-fbank==1.23.0

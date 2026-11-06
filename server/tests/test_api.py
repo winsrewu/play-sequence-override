@@ -12,6 +12,7 @@ from app.embedder import Embedding
 from app.errors import InsufficientScope, TokenInvalid, UpstreamError
 from app.main import create_app
 from app.playlist import dump_playlist, parse_playlist
+from app.vad import LyricsVerdict
 
 
 class FakeVerifier:
@@ -72,6 +73,25 @@ class FakeEmbedder:
         return Embedding(vector=[0.25] * 960, dim=960, model="mn10_as")
 
 
+class FakeLyrics:
+    def __init__(self, _settings: Settings) -> None:
+        pass
+
+    def detect(self, path: Path, resampled_path: Path) -> LyricsVerdict:
+        assert path.exists()
+        return self.detect_16k(path)
+
+    def detect_16k(self, path: Path) -> LyricsVerdict:
+        assert path.exists()
+        return LyricsVerdict(
+            has_lyrics=True,
+            singing_ratio=0.82,
+            singing_seconds=98.5,
+            segments=3,
+            threshold=0.5,
+        )
+
+
 def make_settings(
     tmp_path: Path,
     *,
@@ -118,6 +138,7 @@ def make_client(tmp_path: Path, *, strict: bool = False) -> TestClient:
         settings=make_settings(tmp_path, strict=strict),
         verifier_factory=FakeVerifier,
         embedder_factory=FakeEmbedder,
+        lyrics_factory=FakeLyrics,
         bilibili_factory=FakeBilibili,
     )
     return TestClient(app)
@@ -226,6 +247,7 @@ def test_strict_catalog_rejects_unknown(tmp_path: Path) -> None:
         settings=make_settings(tmp_path, strict=True),
         verifier_factory=FakeVerifier,
         embedder_factory=FakeEmbedder,
+        lyrics_factory=FakeLyrics,
         bilibili_factory=FakeBilibili,
     )
     with TestClient(app) as client:
@@ -244,7 +266,7 @@ def test_only_one_public_route(client: TestClient) -> None:
         for route in client.app.routes  # type: ignore[attr-defined]
         if getattr(route, "path", "").startswith("/")
     }
-    assert paths == {"/v1/embed", "/v1/embeddings"}
+    assert paths == {"/v1/embed", "/v1/embeddings", "/v1/vocals"}
     assert client.get("/docs").status_code == 404
     assert client.get("/openapi.json").status_code == 404
     assert client.get("/").status_code == 404
@@ -307,6 +329,7 @@ def test_partial_download_headers(tmp_path: Path) -> None:
         settings=make_settings(tmp_path, max_duration_seconds=60),
         verifier_factory=FakeVerifier,
         embedder_factory=FakeEmbedder,
+        lyrics_factory=FakeLyrics,
         bilibili_factory=PartialBilibili,
     )
     try:
@@ -340,6 +363,7 @@ def test_short_partial_retries_full(tmp_path: Path) -> None:
         settings=make_settings(tmp_path, max_duration_seconds=60),
         verifier_factory=FakeVerifier,
         embedder_factory=FakeEmbedder,
+        lyrics_factory=FakeLyrics,
         bilibili_factory=lambda _settings: bilibili,
     )
     try:
@@ -375,6 +399,7 @@ def test_dev_mode_bypasses_auth(tmp_path: Path) -> None:
         settings=make_settings(tmp_path, dev_mode=True),
         verifier_factory=FakeVerifier,
         embedder_factory=FakeEmbedder,
+        lyrics_factory=FakeLyrics,
         bilibili_factory=FakeBilibili,
     )
     try:
@@ -482,3 +507,87 @@ def test_single_embed_reports_cached_failure(client: TestClient) -> None:
     )
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "upstream_error"
+
+
+def _vocals(client: TestClient, ids: list[str]):
+    return client.post(
+        "/v1/vocals",
+        json={"internal_ids": ids},
+        headers={"Authorization": "Bearer good"},
+    )
+
+
+def _wait_for_vocals(client: TestClient, ids: list[str], timeout: float = 5.0):
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        body = _vocals(client, ids).json()
+        if not body["pending"]:
+            return body
+        time.sleep(0.02)
+    raise AssertionError(f"vocals did not finish: {body}")
+
+
+def test_vocals_batch_queues_then_reports_verdict(client: TestClient) -> None:
+    queued = _vocals(client, ["BBV16y4y127Dz"])
+    assert queued.status_code == 200
+    assert queued.json()["vocals"] == []
+    assert queued.json()["pending"] == ["BBV16y4y127Dz"]
+    assert queued.json()["model"] == "fireredvad-aed"
+    assert queued.json()["threshold"] == 0.5
+    assert queued.headers["x-vocals-threshold"] == "0.5"
+    assert queued.headers["cache-control"] == "no-store"
+
+    ready = _wait_for_vocals(client, ["BBV16y4y127Dz"])
+    assert ready["pending"] == []
+    item = ready["vocals"][0]
+    assert item["internal_id"] == "BBV16y4y127Dz"
+    assert item["has_lyrics"] is True
+    assert item["singing_ratio"] == 0.82
+    assert item["singing_seconds"] == 98.5
+    assert item["segments"] == 3
+
+
+def test_vocals_reuses_the_embedding_analysis(client: TestClient) -> None:
+    embedded = client.post(
+        "/v1/embed",
+        json={"internal_id": "BBV16y4y127Dz"},
+        headers={"Authorization": "Bearer good"},
+    )
+    assert embedded.status_code == 200
+    body = _vocals(client, ["BBV16y4y127Dz"]).json()
+    assert body["pending"] == []
+    assert body["vocals"][0]["has_lyrics"] is True
+
+
+def test_vocals_is_batch_only(client: TestClient) -> None:
+    single = client.post(
+        "/v1/vocals",
+        json={"internal_id": "BBV16y4y127Dz"},
+        headers={"Authorization": "Bearer good"},
+    )
+    assert single.status_code == 400
+    assert single.json()["error"]["code"] == "invalid_request"
+    assert client.get("/v1/vocals").status_code == 405
+
+
+def test_vocals_requires_auth(client: TestClient) -> None:
+    response = client.post("/v1/vocals", json={"internal_ids": ["BBV16y4y127Dz"]})
+    assert response.status_code == 401
+
+
+def test_vocals_rejects_more_than_fifteen(client: TestClient) -> None:
+    response = _vocals(client, ["BBV16y4y127Dz"] * 16)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_vocals_reports_failed_tracks(client: TestClient) -> None:
+    queued = _vocals(client, ["BBV1AA411p7zs"])
+    assert queued.json()["pending"] == ["BBV1AA411p7zs"]
+
+    body = _wait_for_vocals(client, ["BBV1AA411p7zs"])
+    assert body["pending"] == []
+    assert [item["internal_id"] for item in body["failures"]] == ["BBV1AA411p7zs"]
+    assert body["failures"][0]["code"] == "upstream_error"

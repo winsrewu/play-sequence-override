@@ -15,7 +15,20 @@ import {
   projectPoint,
   shouldReuseDerived,
 } from './lib/derived.js'
-import { embedTrack, embedTrackBatch } from './lib/embed-api.js'
+import {
+  LANE_INSTRUMENTAL,
+  LANE_LYRICS,
+  LYRICS_THRESHOLD_DEFAULT,
+  formatLyricsRatio,
+  laneAt,
+  laneCandidates,
+  lanePreview,
+  lyricsCounts,
+  normalizeLyricsShare,
+  parseLyricsRatio,
+} from './lib/lyrics.js'
+import { parseLyricsText } from './lib/lyrics-json.js'
+import { analyzeVocalsBatch, embedTrack, embedTrackBatch } from './lib/embed-api.js'
 import {
   cacheEmbedding,
   cacheEmbeddings,
@@ -68,6 +81,29 @@ const EMBED_ITEM_DEADLINE_MS = 15 * 60_000
 const MANUAL_PREFETCH_ALARM = 'jawbts-manual-prefetch'
 const AUTO_FETCH_COOLDOWN_MS = 60_000
 let lastAutoFetchAt = 0
+
+const LYRICS_ALARM = 'jawbts-lyrics-analysis'
+const LYRICS_BATCH_SIZE = 15
+const LYRICS_POLL_START_MS = 2000
+const LYRICS_POLL_MAX_MS = 15000
+const LYRICS_ITEM_DEADLINE_MS = 15 * 60_000
+const LYRICS_AUTO_COOLDOWN_MS = 60_000
+let lastLyricsAutoStartAt = 0
+let lyricsJobPromise = null
+let lyricsStarting = false
+let lyricsState = {
+  running: false,
+  complete: false,
+  waitingAuth: false,
+  waitingConsent: false,
+  done: 0,
+  total: 0,
+  remaining: 0,
+  failed: 0,
+  startedAt: null,
+  startDone: 0,
+  updatedAt: null,
+}
 
 function broadcast(message) {
   try {
@@ -202,6 +238,9 @@ async function initialize() {
   if (!initialization) {
     initialization = (async () => {
       await getConfig()
+      // Verdicts saved with an older threshold are re-derived from their stored
+      // ratio before the first status is served.
+      await refreshLyricsVerdicts().catch(() => 0)
       return ensureCatalog()
     })().catch((error) => {
       initialization = null
@@ -400,6 +439,14 @@ async function status() {
   }
 
   const byId = new Map(catalog.tracks.map((track) => [track.id, track]))
+  const lyrics = await store.getLyrics()
+  const lyricsSummary = lyricsCounts(lyrics, catalog.tracks.map((track) => track.id))
+  const currentLyrics = currentId ? lyrics.get(currentId) || null : null
+  // Vectors come first: the service analyzes one track per request, so wait
+  // until the prefetch has filled the library before running detection.
+  if (lyricsSummary.unknown > 0) {
+    startLyricsFetch().catch(() => {})
+  }
   const owner = await ownerTabEntry()
   return {
     ok: true,
@@ -429,6 +476,13 @@ async function status() {
     gatewayAllowlistHost: new URL(redirectUri()).hostname,
     summary: playlistSummary(catalog),
     sessionPlays: plays,
+    lyrics: {
+      enabled: config.lyricsEnabled,
+      share: config.lyricsShare,
+      ...lyricsSummary,
+      current: currentLyrics,
+      job: lyricsProgress(),
+    },
     prefetch: {
       ...prefetchState,
       etaSeconds: prefetchState.running
@@ -651,14 +705,61 @@ async function selectNext({
     ? Math.min(100, Math.max(0, requestedTarget)) / 100
     : config.targetSimilarity / 100
   const tuning = tuningOverride || tuningFromConfig(config)
-  const decision = recommender.selectNextDetailed(
+  // Deterministic lyrics lane: the cursor advances once per picked track and
+  // resets when the share changes. Unanalyzed tracks stay in both lanes.
+  const share = normalizeLyricsShare(config.lyricsShare)
+  const trackIds = catalog.tracks.map((track) => track.id)
+  let allowedIds = null
+  let nextCursor = null
+  let lanes = null
+  let lyricsMeta = { enabled: false, share }
+  if (config.lyricsEnabled) {
+    const lyrics = await store.getLyrics()
+    let cursor = await store.getLyricsCursor()
+    if (cursor.share !== share) cursor = { share, index: 0 }
+    const lane = laneAt(cursor.index, share)
+    allowedIds = laneCandidates(lyrics, trackIds, lane)
+    nextCursor = { share, index: cursor.index + 1 }
+    lanes = { lyrics, lane }
+    lyricsMeta = {
+      enabled: true,
+      share,
+      lane,
+      laneSize: allowedIds.size,
+      known: lyricsCounts(lyrics, trackIds).known,
+      cursor: cursor.index,
+    }
+  }
+  let decision = recommender.selectNextDetailed(
     current,
     history,
     target,
     Math.random,
     plays,
     tuning,
+    { allowedIds },
   )
+  if (lanes && decision.poolSize === 0) {
+    // The chosen lane has no eligible track. Keep the draw inside a single lane:
+    // try the other lane instead of mixing every track together or stalling.
+    const other = lanes.lane === LANE_LYRICS ? LANE_INSTRUMENTAL : LANE_LYRICS
+    const otherIds = laneCandidates(lanes.lyrics, trackIds, other)
+    const fallback = otherIds.size > 0
+      ? recommender.selectNextDetailed(
+          current,
+          history,
+          target,
+          Math.random,
+          plays,
+          tuning,
+          { allowedIds: otherIds },
+        )
+      : null
+    if (fallback && fallback.poolSize > 0) {
+      decision = fallback
+      lyricsMeta = { ...lyricsMeta, lane: other, laneSize: otherIds.size, fallback: true }
+    }
+  }
   const nextId = decision.id
   if (nextId === current) {
     lastDecision = {
@@ -674,10 +775,15 @@ async function selectNext({
       },
       result: { nextId, emptyPool: true },
       algorithm: decision,
+      lyrics: lyricsMeta,
     }
     console.info('[jawbts] next-track decision', lastDecision)
     await store.setLastDecision(lastDecision).catch(() => {})
-    throw new Error('No eligible next track; the candidate pool is empty.')
+    throw new Error(
+      config.lyricsEnabled
+        ? 'No eligible next track; unclassified tracks are skipped while the lyrics share is on.'
+        : 'No eligible next track; the candidate pool is empty.',
+    )
   }
 
   const track = catalog.tracks.find((entry) => entry.id === nextId)
@@ -700,12 +806,14 @@ async function selectNext({
       nextTrack: trackMeta(track),
     },
     algorithm: decision,
+    lyrics: lyricsMeta,
   }
   console.info('[jawbts] next-track decision', lastDecision)
   await store.setLastDecision(lastDecision).catch(() => {})
 
   if (newTab) await adoptTab(await chrome.tabs.create({ url: trackUrl(track) }), track.id)
   else await navigate(tabId, track, config.softNavigation)
+  if (nextCursor) await store.setLyricsCursor(nextCursor).catch(() => {})
   return {
     ok: true,
     current: trackMeta(catalog.tracks.find((entry) => entry.id === current)),
@@ -960,7 +1068,329 @@ async function runPrefetch(onProgress) {
   invalidateRecommender()
   await getRecommender(true)
   broadcast({ type: 'data-changed', kind: 'embeddings' })
+  startLyricsAnalysis().catch(() => {})
   return { ok: true, total, done, failed, failures }
+}
+
+// --- Lyrics analysis -------------------------------------------------------
+// The service runs FireRedVAD on a track's audio and returns a vocal ratio
+// (singing or speech); the extension stores the binary verdict and never
+// analyzes audio itself.
+
+function lyricsProgress() {
+  return {
+    ...lyricsState,
+    etaSeconds: lyricsState.running
+      ? estimateEta(
+          lyricsState.done - lyricsState.startDone,
+          lyricsState.remaining,
+          lyricsState.startedAt,
+        )
+      : null,
+  }
+}
+
+function emitLyrics() {
+  broadcast({ type: 'lyrics-progress', ...lyricsProgress() })
+}
+
+async function lyricsTargets() {
+  const [catalog, lyrics, unavailable] = await Promise.all([
+    ensureCatalog(),
+    store.getLyrics(),
+    activeUnavailable(),
+  ])
+  const blocked = new Set(Object.keys(unavailable))
+  return catalog.tracks
+    .map((track) => track.id)
+    .filter((id) => {
+      if (blocked.has(id)) return false
+      // Any stored verdict (manual or detected) is kept; detection only fills
+      // tracks that have none.
+      if (lyrics.has(id)) return false
+      return true
+    })
+}
+
+// Same lifecycle as the vector prefetch: run automatically when some track
+// still has no verdict, with its own cooldown inside.
+async function startLyricsFetch() {
+  if (lyricsJobPromise || lyricsStarting) return
+  const [catalog, lyrics, loaded] = await Promise.all([
+    ensureCatalog(),
+    store.getLyrics(),
+    loadAllVectors(),
+  ])
+  if (!catalog.tracks.some((track) => !lyrics.has(track.id))) return
+  // The vector pass computes a verdict with each vector. Waiting for it keeps a
+  // fresh library from being downloaded twice; once vectors are local, the
+  // detection-only pass runs on its own.
+  if (missingTrackIds(catalog.tracks, loaded.vectors).length > 0) return
+  await startLyricsAnalysis()
+}
+
+let lyricsVerdictsRefreshed = false
+
+async function refreshLyricsVerdicts() {
+  if (lyricsVerdictsRefreshed) return 0
+  lyricsVerdictsRefreshed = true
+  const threshold =
+    (await store.getLyricsThreshold()) ?? LYRICS_THRESHOLD_DEFAULT
+  return syncLyricsThreshold(threshold)
+}
+
+// The service owns the threshold. When it changes, re-evaluate the verdicts we
+// already stored from their saved vocal ratio, so a tuning applies to the whole
+// library without another audio pass.
+async function syncLyricsThreshold(threshold) {
+  if (!Number.isFinite(threshold)) return 0
+  const previous = await store.getLyricsThreshold()
+  if (previous === threshold) return 0
+  const lyrics = await store.getLyrics()
+  const updates = new Map()
+  for (const [id, entry] of lyrics) {
+    if (entry.source === 'manual') continue
+    if (typeof entry.confidence !== 'number') continue
+    const verdict = entry.confidence >= threshold
+    if (verdict !== entry.lyrics) updates.set(id, { ...entry, lyrics: verdict })
+  }
+  if (updates.size > 0) await store.mergeLyrics(updates)
+  await store.setLyricsThreshold(threshold)
+  return updates.size
+}
+
+async function startLyricsAnalysis() {
+  if (lyricsJobPromise || lyricsStarting) {
+    return { ok: true, running: true, total: lyricsState.total }
+  }
+  lyricsStarting = true
+  try {
+    const targets = await lyricsTargets()
+    if (targets.length === 0) {
+      lyricsState = {
+        ...lyricsState,
+        running: false,
+        complete: true,
+        waitingAuth: false,
+        waitingConsent: false,
+        done: 0,
+        total: 0,
+        remaining: 0,
+        failed: 0,
+        updatedAt: Date.now(),
+      }
+      return { ok: true, running: false, total: 0 }
+    }
+    const [consent, auth] = await Promise.all([consentStatus(), authStatus()])
+    if (consent.required && !consent.granted) {
+      lyricsState = {
+        ...lyricsState,
+        running: false,
+        complete: false,
+        waitingConsent: true,
+        waitingAuth: false,
+        total: targets.length,
+        remaining: targets.length,
+        updatedAt: Date.now(),
+      }
+      return { ok: true, running: false, total: targets.length }
+    }
+    if (!auth.devMode && !auth.connected) {
+      lyricsState = {
+        ...lyricsState,
+        running: false,
+        complete: false,
+        waitingAuth: true,
+        waitingConsent: false,
+        total: targets.length,
+        remaining: targets.length,
+        updatedAt: Date.now(),
+      }
+      return { ok: true, running: false, total: targets.length }
+    }
+    // Rate-limit attempts so a failure cannot retry on every status refresh.
+    if (Date.now() - lastLyricsAutoStartAt < LYRICS_AUTO_COOLDOWN_MS) {
+      return { ok: true, running: false, total: targets.length }
+    }
+    lastLyricsAutoStartAt = Date.now()
+    const run = runLyricsAnalysis(targets)
+    lyricsJobPromise = run
+      .finally(() => {
+        lyricsJobPromise = null
+      })
+      .catch(() => {})
+    return { ok: true, running: true, total: targets.length }
+  } finally {
+    lyricsStarting = false
+  }
+}
+
+async function runLyricsAnalysis(targets) {
+  const catalog = await ensureCatalog()
+  const titles = new Map(catalog.tracks.map((track) => [track.id, track.title]))
+  const trackIds = catalog.tracks.map((track) => track.id)
+  const total = targets.length
+  let done = 0
+  let failed = 0
+  let failure = null
+  const startedAt = Date.now()
+  const queue = [...targets]
+  const batchWindow = new Map()
+  let wait = LYRICS_POLL_START_MS
+  try {
+    chrome.alarms?.create(LYRICS_ALARM, { periodInMinutes: 0.5 })
+  } catch {
+  }
+  const refreshCounts = async () => {
+    lyricsState = {
+      ...lyricsState,
+      counts: lyricsCounts(await store.getLyrics(), trackIds),
+    }
+  }
+  lyricsState = {
+    running: true,
+    complete: false,
+    waitingAuth: false,
+    waitingConsent: false,
+    done,
+    total,
+    remaining: total,
+    failed,
+    startedAt,
+    startDone: 0,
+    updatedAt: Date.now(),
+    counts: null,
+  }
+  await refreshCounts()
+  await store.setLyricsJob({ kind: 'analysis', total, done, failed, startedAt }).catch(() => {})
+  emitLyrics()
+  try {
+    while (queue.length > 0 || batchWindow.size > 0) {
+      let refilled = false
+      while (batchWindow.size < LYRICS_BATCH_SIZE && queue.length > 0) {
+        batchWindow.set(queue.shift(), Date.now())
+        refilled = true
+      }
+      if (batchWindow.size === 0) break
+      const ids = [...batchWindow.keys()]
+      let result
+      try {
+        result = await analyzeVocalsBatch(ids)
+      } catch (error) {
+        if (error?.code === 'token_expired' || error?.name === 'AuthError') throw error
+        if (error?.code === 'unsupported') throw new Error(error.message)
+        for (const id of ids) {
+          batchWindow.delete(id)
+          failed += 1
+        }
+        continue
+      }
+      if (result.unsupported) {
+        throw new Error('This embedding service does not offer lyrics detection.')
+      }
+      const updates = new Map()
+      const at = new Date().toISOString()
+      for (const [id, item] of result.ready) {
+        if (!batchWindow.has(id)) continue
+        updates.set(id, {
+          lyrics: item.lyrics,
+          confidence: item.confidence,
+          source: 'detected',
+          at,
+        })
+        batchWindow.delete(id)
+        done += 1
+      }
+      if (updates.size > 0) {
+        await store.mergeLyrics(updates)
+        await syncLyricsThreshold(result.threshold)
+        await refreshCounts()
+      }
+      for (const [id, failure] of result.failures) {
+        if (!batchWindow.has(id)) continue
+        // Deleted or private videos are skipped by the next run, like the vector
+        // prefetch does; transient failures retry after the cooldown.
+        if (failure.code === 'video_unavailable') {
+          await store.markVectorUnavailable(id, {
+            code: failure.code,
+            message: failure.message,
+            title: titles.get(id) || '',
+          })
+        }
+        batchWindow.delete(id)
+        failed += 1
+      }
+      if (result.pending.length === 0) {
+        for (const id of [...batchWindow.keys()]) {
+          batchWindow.delete(id)
+          failed += 1
+        }
+      }
+      const now = Date.now()
+      for (const [id, queuedAt] of [...batchWindow.entries()]) {
+        if (now - queuedAt > LYRICS_ITEM_DEADLINE_MS) {
+          batchWindow.delete(id)
+          failed += 1
+        }
+      }
+      lyricsState = {
+        ...lyricsState,
+        done,
+        total,
+        remaining: Math.max(0, total - done),
+        failed,
+        updatedAt: Date.now(),
+      }
+      await store.setLyricsJob({ kind: 'analysis', total, done, failed, startedAt }).catch(() => {})
+      emitLyrics()
+      if (batchWindow.size === 0 && queue.length === 0) break
+      if (refilled || result.ready.size > 0) wait = LYRICS_POLL_START_MS
+      await delay(wait)
+      wait = Math.min(LYRICS_POLL_MAX_MS, Math.round(wait * 1.4))
+    }
+  } catch (error) {
+    failure = error
+  } finally {
+    await store.clearLyricsJob().catch(() => {})
+    try {
+      chrome.alarms?.clear(LYRICS_ALARM)
+    } catch {
+    }
+    await refreshCounts().catch(() => {})
+    lyricsState = {
+      running: false,
+      complete: failure === null,
+      waitingAuth: false,
+      waitingConsent: false,
+      done,
+      total,
+      remaining: Math.max(0, total - done),
+      failed,
+      startedAt,
+      startDone: 0,
+      updatedAt: Date.now(),
+      counts: lyricsState.counts,
+    }
+    emitLyrics()
+    broadcast({ type: 'data-changed', kind: 'lyrics' })
+  }
+  if (failure) throw failure
+  return { ok: true, total, done, failed }
+}
+
+async function resumeLyricsAnalysis() {
+  if (lyricsJobPromise) return
+  const job = await store.getLyricsJob().catch(() => null)
+  if (!job) {
+    try {
+      chrome.alarms?.clear(LYRICS_ALARM)
+    } catch {
+    }
+    return
+  }
+  startLyricsAnalysis().catch((error) => {
+    console.error('lyrics analysis resume failed', error)
+  })
 }
 
 async function importPlaylist(text) {
@@ -977,12 +1407,14 @@ async function importPlaylist(text) {
   await pruneVectors().catch(() => 0)
 
   const ids = new Set(playlist.tracks.map((track) => track.id))
+  await store.pruneLyrics(ids).catch(() => 0)
   const history = await store.getHistory()
   await store.setHistory(history.filter((id) => ids.has(id)))
   const current = await store.getCurrent()
   if (current && !ids.has(current)) await store.setCurrent(null)
   broadcast({ type: 'data-changed', kind: 'playlist' })
   startVectorFetch().catch(() => {})
+  startLyricsFetch().catch(() => {})
   return { ok: true, ...playlistSummary(playlist) }
 }
 
@@ -1000,6 +1432,7 @@ async function saveConfig(patch) {
   const current = await getConfig()
   const next = normalizeConfig({ ...current, ...patch })
   await setConfig(next)
+  broadcast({ type: 'data-changed', kind: 'config' })
   return { ok: true, config: next }
 }
 
@@ -1019,6 +1452,27 @@ async function graphData(targetSimilarity = null, tuningOverride = null) {
   } catch (error) {
     console.error('projection failed', error)
   }
+
+  // With the share on, the cloud shows the lane the next pick would use (plus
+  // the current track as the anchor); tracks the selector cannot pick are gone.
+  let lane = { enabled: false }
+  let allowedIds = null
+  let keep = null
+  if (config.lyricsEnabled) {
+    const [lyrics, cursor] = await Promise.all([
+      store.getLyrics(),
+      store.getLyricsCursor(),
+    ])
+    const share = normalizeLyricsShare(config.lyricsShare)
+    const active = cursor.share === share ? cursor : { share, index: 0 }
+    const laneName = laneAt(active.index, share)
+    allowedIds = laneCandidates(lyrics, recommender.ids, laneName)
+    keep = new Set(allowedIds)
+    if (currentId) keep.add(currentId)
+    points = points.filter((point) => keep.has(point.id))
+    lane = { enabled: true, share, lane: laneName, size: allowedIds.size }
+  }
+
   const requested = Number(targetSimilarity)
   const targetPercent = Number.isFinite(requested)
     ? Math.min(100, Math.max(0, requested))
@@ -1034,6 +1488,7 @@ async function graphData(targetSimilarity = null, tuningOverride = null) {
       max: 0,
       raw: {},
       points,
+      lane,
     }
   }
   const { probabilities, maxProbability } = recommender.probabilities(
@@ -1042,16 +1497,25 @@ async function graphData(targetSimilarity = null, tuningOverride = null) {
     target,
     plays,
     tuning,
+    allowedIds ? { allowedIds } : {},
   )
+  const visibleProbabilities = keep
+    ? new Map([...probabilities].filter(([id]) => keep.has(id)))
+    : probabilities
+  const raw = recommender.rawSimilarities(currentId)
+  const visibleRaw = keep
+    ? new Map([...raw].filter(([id]) => keep.has(id)))
+    : raw
   return {
     ok: true,
     current: currentId,
     target: targetPercent,
     tuning,
-    probabilities: Object.fromEntries(probabilities),
+    probabilities: Object.fromEntries(visibleProbabilities),
     max: maxProbability,
-    raw: Object.fromEntries(recommender.rawSimilarities(currentId)),
+    raw: Object.fromEntries(visibleRaw),
     points,
+    lane,
   }
 }
 
@@ -1091,6 +1555,10 @@ const CONSOLE_HELP = [
   'login | logout                           manage the account session',
   'consent grant|revoke                     allow or revoke remote service calls',
   'prefetch                                 fetch missing vectors',
+  'lyrics [status]                          share, verdict counts and progress',
+  'lyrics mix on|off                        enable or disable the lyrics share',
+  'lyrics ratio <1:x|percent>               mix: 1:1.5, 0:1, 1:0 or 40%',
+  'lyrics on|off [id...]                    mark tracks (default: the current one)',
   'clear                                    clear this transcript',
 ]
 
@@ -1497,6 +1965,7 @@ async function consoleForget(args, flags) {
       for (const id of ids) nextRemoved.delete(id)
       await store.setRemovedTracks(nextRemoved)
       await store.deleteVectorCacheEntries(ids)
+      await store.deleteLyricsEntries(ids)
       await store.setHistory(history.filter((id) => !ids.includes(id)))
       const plays = await store.getSessionPlays()
       let playsChanged = false
@@ -1712,6 +2181,7 @@ async function consoleLogin() {
   await requireRemoteConsent()
   const session = await authConnect()
   startVectorFetch().catch(() => {})
+  startLyricsFetch().catch(() => {})
   return [`signed in${session?.devMode ? ' (dev mode)' : ''}`]
 }
 
@@ -1768,6 +2238,125 @@ async function consoleConsent(args) {
 async function consolePrefetch() {
   const result = await prefetch()
   return [`prefetch ${result.done ?? 0}/${result.total ?? 0}`]
+}
+
+function lyricsPatternText(share, length = 10) {
+  return lanePreview(share, length)
+    .map((lane) => (lane === LANE_LYRICS ? 'L' : 'NL'))
+    .join(' ')
+}
+
+async function consoleLyrics(args) {
+  const sub = String(args[0] || 'status').toLowerCase()
+  if (!['status', 'mix', 'ratio', 'on', 'off'].includes(sub)) {
+    throw new Error('usage: lyrics [status|mix on|off|ratio <1:x|percent>|on|off [id...]]')
+  }
+  const config = await getConfig()
+
+  if (sub === 'ratio') {
+    if (args.length < 2) throw new Error('usage: lyrics ratio <1:x|percent>')
+    const value = parseLyricsRatio(args[1])
+    const previous = config.lyricsShare
+    return {
+      preview: {
+        title: 'lyrics ratio',
+        summary: `${formatLyricsRatio(previous)} → ${formatLyricsRatio(value)}`,
+        items: [{ text: `pattern ${lyricsPatternText(value)}` }],
+        destructive: false,
+      },
+      apply: async () => {
+        await setConfig({ ...config, lyricsShare: value })
+        await store.setLyricsCursor({ share: value, index: 0 })
+        broadcast({ type: 'data-changed', kind: 'config' })
+        return [`lyrics ratio ${formatLyricsRatio(value)}`, `pattern ${lyricsPatternText(value)}`]
+      },
+    }
+  }
+
+  if (sub === 'mix') {
+    const action = String(args[1] || '').toLowerCase()
+    if (!['on', 'off'].includes(action)) throw new Error('usage: lyrics mix on|off')
+    const value = action === 'on'
+    return {
+      preview: {
+        title: `lyrics mix ${action}`,
+        summary: `lyrics share ${config.lyricsEnabled ? 'on' : 'off'} → ${value ? 'on' : 'off'}`,
+        items: [
+          {
+            text: value
+              ? 'the 500 candidates are drawn from the matching lane only'
+              : 'the 500 candidates come from every track',
+          },
+        ],
+        destructive: false,
+      },
+      apply: async () => {
+        await setConfig({ ...config, lyricsEnabled: value })
+        broadcast({ type: 'data-changed', kind: 'config' })
+        if (value) startLyricsFetch().catch(() => {})
+        return [`lyrics share ${value ? 'on' : 'off'}`]
+      },
+    }
+  }
+
+  if (sub === 'on' || sub === 'off') {
+    const wanted = sub === 'on'
+    const ids =
+      args.length > 1
+        ? consoleIds(args.slice(1))
+        : [await store.getCurrent()].filter(Boolean)
+    if (ids.length === 0) throw new Error('give a track id or play a track first')
+    const lyrics = await store.getLyrics()
+    const items = ids.map((id) => {
+      const entry = lyrics.get(id)
+      const previous = entry ? (entry.lyrics ? 'lyrics' : 'instrumental') : 'unknown'
+      return { text: `${id}  ${previous} → ${wanted ? 'lyrics' : 'instrumental'}` }
+    })
+    return {
+      preview: {
+        title: `lyrics ${sub}`,
+        summary: `${ids.length} track${ids.length === 1 ? '' : 's'} set to ${wanted ? 'lyrics' : 'instrumental'}`,
+        items,
+        destructive: true,
+      },
+      apply: async () => {
+        const at = new Date().toISOString()
+        const updates = new Map(
+          ids.map((id) => [
+            id,
+            { lyrics: wanted, confidence: null, source: 'manual', at },
+          ]),
+        )
+        await store.mergeLyrics(updates)
+        broadcast({ type: 'data-changed', kind: 'lyrics' })
+        return [
+          `${ids.length} track${ids.length === 1 ? '' : 's'} set to ${wanted ? 'lyrics' : 'instrumental'}`,
+        ]
+      },
+    }
+  }
+
+  const [catalog, lyrics, currentId] = await Promise.all([
+    ensureCatalog(),
+    store.getLyrics(),
+    store.getCurrent(),
+  ])
+  const counts = lyricsCounts(lyrics, catalog.tracks.map((track) => track.id))
+  const current = currentId ? lyrics.get(currentId) || null : null
+  const job = lyricsProgress()
+  const items = [
+    `mix       ${config.lyricsEnabled ? 'on' : 'off'} · ${formatLyricsRatio(config.lyricsShare)}  ${lyricsPatternText(config.lyricsShare)}`,
+    `tracks    ${counts.tracks} · ${counts.withLyrics} with lyrics · ${counts.withoutLyrics} without · ${counts.unknown} unknown`,
+    currentId
+      ? `current   ${currentId} · ${current ? (current.lyrics ? 'lyrics' : 'instrumental') : 'unknown'}${current?.source === 'manual' ? ' (manual)' : ''}`
+      : 'current   nothing recorded',
+    job.running
+      ? `progress  ${job.done}/${job.total}${job.remaining ? ` · ${job.remaining} left` : ''}${job.failed ? ` · ${job.failed} failed` : ''}`
+      : counts.unknown > 0
+        ? 'progress  idle — fetching automatically'
+        : 'progress  complete',
+  ]
+  return consoleListing('lyrics', items)
 }
 
 const partInfoCache = new Map()
@@ -1906,6 +2495,8 @@ async function runConsoleCommand(message) {
       return settle(await consoleConsent(args))
     case 'prefetch':
       return { ok: true, lines: await consolePrefetch() }
+    case 'lyrics':
+      return settle(await consoleLyrics(args, flags))
     default:
       throw new Error(`unknown command ${JSON.stringify(name)} — try help`)
   }
@@ -1927,6 +2518,7 @@ async function handleMessage(message, sender) {
       await requireRemoteConsent()
       await authConnect()
       startVectorFetch().catch(() => {})
+      startLyricsFetch().catch(() => {})
       return status()
     case 'consent-status':
       return { ok: true, consent: await consentStatus() }
@@ -2101,6 +2693,37 @@ async function handleMessage(message, sender) {
       return { ok: true }
     case 'prefetch':
       return prefetch()
+    case 'set-lyrics': {
+      const id =
+        typeof message.id === 'string' && message.id ? message.id : await store.getCurrent()
+      if (!id) throw new Error('No current track to update.')
+      const wanted = Boolean(message.value)
+      await store.setLyricsEntry(id, {
+        lyrics: wanted,
+        confidence: null,
+        source: 'manual',
+        at: new Date().toISOString(),
+      })
+      broadcast({ type: 'data-changed', kind: 'lyrics' })
+      return { ok: true, id, lyrics: wanted }
+    }
+    case 'import-lyrics': {
+      const entries = parseLyricsText(message.text)
+      const catalog = await ensureCatalog()
+      const known = new Set(catalog.tracks.map((track) => track.id))
+      const updates = new Map()
+      let ignored = 0
+      for (const [id, entry] of entries) {
+        if (known.has(id)) updates.set(id, entry)
+        else ignored += 1
+      }
+      const count = await store.mergeLyrics(updates)
+      broadcast({ type: 'data-changed', kind: 'lyrics' })
+      return { ok: true, count, ignored }
+    }
+    case 'lyrics-changed':
+      broadcast({ type: 'data-changed', kind: 'lyrics' })
+      return { ok: true }
     case 'save-config':
       return saveConfig(message.config || {})
     case 'set-target':
@@ -2164,6 +2787,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.runtime.onInstalled.addListener(() => {
   initialize()
     .then(() => startVectorFetch())
+    .then(() => startLyricsFetch())
     .catch((error) => console.error('initialization failed', error))
 })
 
@@ -2171,6 +2795,9 @@ if (chrome.alarms?.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm?.name === MANUAL_PREFETCH_ALARM) {
       resumeManualPrefetch().catch((error) => console.error('manual prefetch alarm failed', error))
+    }
+    if (alarm?.name === LYRICS_ALARM) {
+      resumeLyricsAnalysis().catch((error) => console.error('lyrics analysis alarm failed', error))
     }
   })
 }
@@ -2182,5 +2809,6 @@ chrome.runtime.onStartup.addListener(() => {
     .then(() => store.resetSessionPlays())
     .then(() => resumeManualPrefetch())
     .then(() => startVectorFetch())
+    .then(() => startLyricsFetch())
     .catch((error) => console.error('initialization failed', error))
 })

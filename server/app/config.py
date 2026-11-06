@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,19 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     except ValueError as exc:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from exc
     if not minimum <= value <= maximum:
+        raise ConfigError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = _env(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from exc
+    if not math.isfinite(value) or not minimum <= value <= maximum:
         raise ConfigError(f"{name} must be between {minimum} and {maximum}")
     return value
 
@@ -74,6 +88,15 @@ class Settings:
     device: str = "cpu"
     torch_threads: int = 4
     max_duration_seconds: int = 900
+
+    # FireRedVAD AED vocal detection on 16 kHz PCM.
+    vocals_model_path: Path = Path("/app/assets/fireredvad/AED")
+    vocals_min_ratio: float = 0.5
+    vocals_singing_threshold: float = 0.5
+    vocals_min_event_frames: int = 20
+    # Detection-only jobs (no CNN embedding) run on their own small pool.
+    vocals_workers: int = 4
+    vocals_max_pending: int = 256
 
     ffmpeg_bin: str = "ffmpeg"
     http_timeout_seconds: int = 30
@@ -123,6 +146,17 @@ class Settings:
             raise ConfigError(f"EFFICIENTAT_PATH does not exist: {self.efficientat_path}")
         if self.device not in {"cpu", "cuda"}:
             raise ConfigError("DEVICE must be cpu or cuda")
+        if not self.vocals_model_path.is_dir():
+            raise ConfigError(f"VOCALS_MODEL_PATH does not exist: {self.vocals_model_path}")
+        for name in ("cmvn.ark", "model.pth.tar"):
+            if not (self.vocals_model_path / name).is_file():
+                raise ConfigError(f"VOCALS_MODEL_PATH is missing {name}")
+        if not 0.0 <= self.vocals_min_ratio <= 1.0:
+            raise ConfigError("VOCALS_MIN_RATIO must be between 0 and 1")
+        if not 0.0 <= self.vocals_singing_threshold <= 1.0:
+            raise ConfigError("VOCALS_SINGING_THRESHOLD must be between 0 and 1")
+        if not 1 <= self.vocals_min_event_frames <= 1000:
+            raise ConfigError("VOCALS_MIN_EVENT_FRAMES must be between 1 and 1000")
 
 
 def load_settings() -> Settings:
@@ -150,6 +184,22 @@ def load_settings() -> Settings:
         torch_threads=_env_int("TORCH_THREADS", 4, minimum=1, maximum=64),
         max_duration_seconds=_env_int(
             "MAX_DURATION_SECONDS", 900, minimum=1, maximum=3600
+        ),
+        vocals_model_path=Path(
+            _env("VOCALS_MODEL_PATH", "/app/assets/fireredvad/AED")
+        ),
+        vocals_min_ratio=_env_float(
+            "VOCALS_MIN_RATIO", 0.5, minimum=0.0, maximum=1.0
+        ),
+        vocals_singing_threshold=_env_float(
+            "VOCALS_SINGING_THRESHOLD", 0.5, minimum=0.0, maximum=1.0
+        ),
+        vocals_min_event_frames=_env_int(
+            "VOCALS_MIN_EVENT_FRAMES", 20, minimum=1, maximum=1000
+        ),
+        vocals_workers=_env_int("VOCALS_WORKERS", 4, minimum=1, maximum=16),
+        vocals_max_pending=_env_int(
+            "VOCALS_MAX_PENDING", 256, minimum=1, maximum=4096
         ),
         ffmpeg_bin=_env("FFMPEG_BIN", "ffmpeg") or "ffmpeg",
         http_timeout_seconds=_env_int(

@@ -167,10 +167,28 @@ export class Recommender {
     return minimum
   }
 
-  normalizedSimilarity(raw, referenceIndex) {
-    const low = this.minSimilarity(referenceIndex)
+  normalizedSimilarity(raw, referenceIndex, floor = null) {
+    const low = floor === null || floor === undefined
+      ? this.minSimilarity(referenceIndex)
+      : floor
     if (low >= 1) return 1
     return clamp((raw - low) / (1 - low), 0, 1)
+  }
+
+  // Lowest similarity inside a selected lane. Normalizing against it keeps the
+  // target percentage meaningful after the candidate pool is restricted.
+  similarityFloor(referenceIndex, ids) {
+    if (!(ids instanceof Set)) return 1
+    const vector = this.vectors[referenceIndex]
+    if (!vector) return 1
+    let minimum = Infinity
+    for (const id of ids) {
+      const index = this.indexById.get(id)
+      if (index === undefined || index === referenceIndex) continue
+      const similarity = dot(vector, this.vectors[index])
+      if (similarity < minimum) minimum = similarity
+    }
+    return Number.isFinite(minimum) ? minimum : 1
   }
 
   prepareHistory(rawHistory, current, historyLength = this.constants.DEFAULT_HISTORY_LENGTH) {
@@ -202,12 +220,23 @@ export class Recommender {
     return ordered.slice(0, limit)
   }
 
-  candidatePool(current, historyIds, forceSkip = 0, recentIds = []) {
+  // allowedIds restricts the pool to one lane, so the 500-candidate draw and the
+  // top-10 draw contain only those tracks. The caller decides what to do when a
+  // lane is empty; it never mixes lanes here.
+  candidatePool(current, historyIds, forceSkip = 0, recentIds = [], allowedIds = null) {
     const blocked = new Set([current, ...historyIds])
-    const base = []
-    for (let index = 0; index < this.ids.length; index += 1) {
-      if (!blocked.has(this.ids[index])) base.push(index)
+    const allowed = allowedIds instanceof Set ? allowedIds : null
+    const collect = (excluded) => {
+      const pool = []
+      for (let index = 0; index < this.ids.length; index += 1) {
+        const id = this.ids[index]
+        if (excluded.has(id)) continue
+        if (allowed && !allowed.has(id)) continue
+        pool.push(index)
+      }
+      return pool
     }
+    const base = collect(blocked)
     const recent = Array.isArray(recentIds)
       ? recentIds
       : recentIds && typeof recentIds === 'object'
@@ -216,10 +245,7 @@ export class Recommender {
     if (forceSkip > 0 && recent.length > 0) {
       const forced = new Set(blocked)
       for (const id of recent.slice(0, forceSkip)) forced.add(id)
-      const forcedPool = []
-      for (let index = 0; index < this.ids.length; index += 1) {
-        if (!forced.has(this.ids[index])) forcedPool.push(index)
-      }
+      const forcedPool = collect(forced)
       if (forcedPool.length > 0) return forcedPool
     }
     return base
@@ -296,6 +322,7 @@ export class Recommender {
     targetSimilarity,
     sessionPlays = null,
     tuning = {},
+    floor = null,
   ) {
     const currentIndex = this.indexById.get(current)
     if (currentIndex === undefined) throw new Error(`unknown current track ${current}`)
@@ -310,7 +337,7 @@ export class Recommender {
     for (let c = 0; c < candidateIndices.length; c += 1) {
       const index = candidateIndices[c]
       const raw = dot(this.vectors[index], this.vectors[currentIndex])
-      const similarity = this.normalizedSimilarity(raw, currentIndex)
+      const similarity = this.normalizedSimilarity(raw, currentIndex, floor)
       const base = Math.exp(-sigma * (similarity - target) ** 2)
       const combined = penalties[c] + this.constants.STYLE_WEIGHT * styles[c]
       let score = base * Math.exp(-t.penaltyStrength * combined)
@@ -330,13 +357,14 @@ export class Recommender {
     targetSimilarity,
     sessionPlays = null,
     tuning = {},
+    floor = null,
   ) {
     const currentIndex = this.indexById.get(current)
     if (currentIndex === undefined) throw new Error(`unknown current track ${current}`)
     const t = this._tuning(tuning)
     const target = clamp(Number(targetSimilarity), 0, 1)
     const raw = dot(this.vectors[candidateIndex], this.vectors[currentIndex])
-    const similarity = this.normalizedSimilarity(raw, currentIndex)
+    const similarity = this.normalizedSimilarity(raw, currentIndex, floor)
     const base = Math.exp(-this.constants.SIMILARITY_SIGMA * (similarity - target) ** 2)
     const historyPenalty = this.historyPenalty([candidateIndex], historyIds, t)[0]
     const stylePenalty = this.stylePenalty([candidateIndex], historyIds, t)[0]
@@ -364,17 +392,37 @@ export class Recommender {
     }
   }
 
-  selectNextDetailed(current, rawHistory, targetSimilarity, random = Math.random, sessionPlays = null, tuning = {}) {
+  selectNextDetailed(
+    current,
+    rawHistory,
+    targetSimilarity,
+    random = Math.random,
+    sessionPlays = null,
+    tuning = {},
+    options = {},
+  ) {
     if (!this.indexById.has(current)) throw new Error(`unknown current track ${current}`)
     const t = this._tuning(tuning)
     const history = this.prepareHistory(rawHistory, current, t.historyLength)
-    const pool = this.candidatePool(current, history, t.forceSkip, rawHistory)
+    const pool = this.candidatePool(
+      current,
+      history,
+      t.forceSkip,
+      rawHistory,
+      options.allowedIds ?? null,
+    )
     const target = clamp(Number(targetSimilarity), 0, 1)
+    // When a lane is selected its similarity range is narrower than the whole
+    // catalog; measuring against the lane keeps 75% meaning 75%.
+    const floor = options.allowedIds instanceof Set
+      ? this.similarityFloor(this.indexById.get(current), options.allowedIds)
+      : null
     if (pool.length === 0) {
       return {
         id: current,
         current,
         targetSimilarity: target,
+        similarityFloor: floor,
         history,
         tuning: t,
         poolSize: 0,
@@ -402,6 +450,7 @@ export class Recommender {
       target,
       sessionPlays,
       t,
+      floor,
     )
 
     const k = Math.min(this.constants.TOP_K, candidates.length)
@@ -421,6 +470,7 @@ export class Recommender {
         target,
         sessionPlays,
         t,
+        floor,
       )
       return { ...details, rank: rank + 1, samplePosition: position, score: scores[position] }
     })
@@ -429,6 +479,7 @@ export class Recommender {
       id: this.ids[chosenIndex],
       current,
       targetSimilarity: target,
+      similarityFloor: floor,
       history,
       tuning: t,
       poolSize: pool.length,
@@ -446,17 +497,49 @@ export class Recommender {
     }
   }
 
-  selectNext(current, rawHistory, targetSimilarity, random = Math.random, sessionPlays = null, tuning = {}) {
-    return this.selectNextDetailed(current, rawHistory, targetSimilarity, random, sessionPlays, tuning).id
+  selectNext(
+    current,
+    rawHistory,
+    targetSimilarity,
+    random = Math.random,
+    sessionPlays = null,
+    tuning = {},
+    options = {},
+  ) {
+    return this.selectNextDetailed(
+      current,
+      rawHistory,
+      targetSimilarity,
+      random,
+      sessionPlays,
+      tuning,
+      options,
+    ).id
   }
 
-  probabilities(current, rawHistory, targetSimilarity, sessionPlays = null, tuning = {}) {
+  probabilities(
+    current,
+    rawHistory,
+    targetSimilarity,
+    sessionPlays = null,
+    tuning = {},
+    options = {},
+  ) {
     if (!this.indexById.has(current)) throw new Error(`unknown current track ${current}`)
     const t = this._tuning(tuning)
     const history = this.prepareHistory(rawHistory, current, t.historyLength)
-    const pool = this.candidatePool(current, history, t.forceSkip, rawHistory)
+    const pool = this.candidatePool(
+      current,
+      history,
+      t.forceSkip,
+      rawHistory,
+      options.allowedIds ?? null,
+    )
     if (pool.length === 0) return { probabilities: new Map(), maxProbability: 0 }
 
+    const floor = options.allowedIds instanceof Set
+      ? this.similarityFloor(this.indexById.get(current), options.allowedIds)
+      : null
     const scores = this.scoreCandidates(
       current,
       pool,
@@ -464,6 +547,7 @@ export class Recommender {
       targetSimilarity,
       sessionPlays,
       t,
+      floor,
     )
     let total = 0
     for (const score of scores) total += score

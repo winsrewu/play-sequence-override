@@ -70,3 +70,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## FireRedVAD
+
+Vocal detection (singing or speech) uses **FireRedVAD** (audio event detection task):
+
+- Upstream: <https://github.com/FireRedTeam/FireRedVAD>
+- Model: <https://huggingface.co/FireRedTeam/FireRedVAD> (also on ModelScope)
+- License: **Apache License 2.0**, Copyright 2026 Xiaohongshu.
+- Full license text: `server/assets/fireredvad/LICENSE`.
+- Vendored model: `server/assets/fireredvad/AED/` (`cmvn.ark`,
+  `model.pth.tar`), the AED checkpoint from the release above.

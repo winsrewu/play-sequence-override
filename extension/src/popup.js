@@ -1,3 +1,5 @@
+import { formatLyricsRatio, lanePreview, normalizeLyricsShare } from './lib/lyrics.js'
+
 const $ = (id) => document.getElementById(id)
 
 let refreshing = false
@@ -5,6 +7,7 @@ let refreshQueued = false
 let targetSave = Promise.resolve()
 let lastDecision = null
 let launchMode = false
+let currentLyrics = null
 
 function send(message) {
   return chrome.runtime.sendMessage(message).then((response) => {
@@ -124,6 +127,62 @@ function remaining(state) {
   return Number(state?.remaining) || 0
 }
 
+function renderLyricsShare(share, enabled) {
+  const value = normalizeLyricsShare(share)
+  $('lyrics-share-value').textContent = enabled ? formatLyricsRatio(value) : 'off'
+  const pattern = lanePreview(value, 10)
+    .map((lane) => (lane === 'lyrics' ? 'L' : 'NL'))
+    .join(' ')
+  $('lyrics-share-summary').textContent = !enabled
+    ? 'Original logic: the 500 candidates come from every track.'
+    : value <= 0
+      ? 'Only instrumentals are picked.'
+      : value >= 100
+        ? 'Only tracks with lyrics are picked.'
+        : `${value}% of tracks have lyrics · ${pattern} …`
+}
+
+function renderLyricsState(lyrics) {
+  const progress = $('lyrics-progress')
+  const label = $('lyrics-label')
+  const job = lyrics?.job || null
+  if (!lyrics || !lyrics.tracks) {
+    progress.classList.add('hidden')
+    label.textContent = ''
+    return
+  }
+  if (job?.running) {
+    renderLyricsProgress(job)
+    return
+  }
+  progress.classList.add('hidden')
+  if (job?.waitingConsent) {
+    label.textContent = 'Consent required in Settings & allowlist before fetching lyrics remotely.'
+  } else if (job?.waitingAuth) {
+    label.textContent =
+      `Sign in to fetch ${lyrics.unknown || 0} missing lyrics automatically.`
+  } else if ((lyrics.unknown || 0) > 0) {
+    label.textContent =
+      `${lyrics.unknown} track(s) need a lyrics verdict; fetching automatically when connected.`
+  } else {
+    label.textContent =
+      `All tracks have a lyrics verdict · ${formatLyricsRatio(lyrics.share)}` +
+      (lyrics.enabled ? '' : ' · share off')
+  }
+}
+
+function renderLyricsProgress(job) {
+  if (!job?.running) return
+  const progress = $('lyrics-progress')
+  progress.classList.remove('hidden')
+  progress.max = Math.max(1, job.total)
+  progress.value = Math.min(job.total, job.done)
+  $('lyrics-label').textContent =
+    `Detecting lyrics ${job.done}/${job.total}` +
+    (job.remaining ? ` · ${job.remaining} left` : '') +
+    formatEta(job.etaSeconds)
+}
+
 function render(status, tab = null) {
   const connected = Boolean(status.session?.connected)
   const devMode = Boolean(status.session?.devMode)
@@ -159,8 +218,30 @@ function render(status, tab = null) {
       : 'Open the next track in a new tab'
   launchMode = !status.current
 
+  currentLyrics = status.lyrics?.current || null
+  const lyricsToggle = $('lyrics-toggle')
+  lyricsToggle.disabled = !status.current
+  lyricsToggle.textContent = status.current
+    ? currentLyrics
+      ? `Lyrics: ${currentLyrics.lyrics ? 'yes' : 'no'}` +
+        (currentLyrics.source === 'manual' ? ' (manual)' : '')
+      : 'Lyrics: unknown'
+    : 'Lyrics: —'
+  lyricsToggle.title = status.current
+    ? 'Switch this track between lyrics and instrumental'
+    : 'Play a Bilibili video first'
+  renderLyricsState(status.lyrics)
+
   $('target').value = String(status.targetSimilarity)
   $('target-value').textContent = `${status.targetSimilarity}%`
+
+  const lyricsConfig = status.lyrics || {}
+  const share = normalizeLyricsShare(lyricsConfig.share)
+  const lyricsEnabled = lyricsConfig.enabled !== false
+  $('lyrics-enabled').checked = lyricsEnabled
+  $('lyrics-share').disabled = !lyricsEnabled
+  $('lyrics-share').value = String(share)
+  renderLyricsShare(share, lyricsEnabled)
   $('auto').checked = Boolean(status.autoAdvance)
   $('auto-hint').textContent = status.autoAdvance
     ? 'Auto-advance is ON at the real end of the main video.'
@@ -313,6 +394,50 @@ $('auto').addEventListener('change', (event) => {
   })
 })
 
+$('lyrics-share').addEventListener('input', (event) => {
+  renderLyricsShare(event.target.value, $('lyrics-enabled').checked)
+})
+
+$('lyrics-share').addEventListener('change', (event) => {
+  send({
+    type: 'save-config',
+    config: { lyricsShare: Number(event.target.value) },
+  }).catch((error) => {
+    setError($('auth-error'), error)
+  })
+})
+
+$('lyrics-enabled').addEventListener('change', (event) => {
+  $('lyrics-share').disabled = !event.target.checked
+  renderLyricsShare(Number($('lyrics-share').value), event.target.checked)
+  send({
+    type: 'save-config',
+    config: { lyricsEnabled: event.target.checked },
+  }).catch((error) => {
+    setError($('auth-error'), error)
+  })
+})
+
+$('lyrics-toggle').addEventListener('click', (event) => {
+  const button = event.currentTarget
+  if (button.disabled) return
+  const wanted = currentLyrics ? !currentLyrics.lyrics : true
+  // Flip the button now; the IndexedDB write and the status refresh run behind
+  // it, so a toggle never waits for the whole library to be re-summarized.
+  currentLyrics = {
+    ...(currentLyrics || {}),
+    lyrics: wanted,
+    confidence: null,
+    source: 'manual',
+  }
+  button.textContent = `Lyrics: ${wanted ? 'yes' : 'no'} (manual)`
+  // Fire and forget: the write and the follow-up status refresh happen in the
+  // background. A failure is reported but never rolls the label back.
+  send({ type: 'set-lyrics', value: wanted }).catch((error) => {
+    setError($('auth-error'), error)
+  })
+})
+
 $('import-file').addEventListener('change', async (event) => {
   const file = event.target.files?.[0]
   event.target.value = ''
@@ -390,6 +515,10 @@ $('decision-download').addEventListener('click', () => {
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'data-changed') {
     refresh()
+    return
+  }
+  if (message?.type === 'lyrics-progress') {
+    renderLyricsProgress(message)
     return
   }
   if (message?.type !== 'prefetch-progress') return

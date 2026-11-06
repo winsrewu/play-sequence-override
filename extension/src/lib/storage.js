@@ -26,6 +26,10 @@ export const KEYS = Object.freeze({
   consent: 'consent',
   unavailable: 'unavailable',
   migrated: 'migrated_v2',
+  lyrics: 'lyrics',
+  lyricsLane: 'lyricsLane',
+  lyricsJob: 'lyricsJob',
+  lyricsThreshold: 'lyricsThreshold',
 })
 
 const LEGACY_KEYS = [
@@ -115,7 +119,7 @@ export async function getConfig() {
   await ensureMigrated()
   const stored = await kvGet(KEYS.config, null)
   try {
-    return normalizeConfig({ ...DEFAULT_CONFIG, ...(stored || {}) })
+    return normalizeConfig(stored || {})
   } catch {
     return { ...DEFAULT_CONFIG }
   }
@@ -328,6 +332,141 @@ export async function clearVectorUnavailable(id) {
   if (!(id in entries)) return
   delete entries[id]
   await setUnavailableVectors(entries)
+}
+
+// --- Lyrics verdicts ------------------------------------------------------
+// id -> { lyrics, confidence, source, at }. A missing id means "not analyzed".
+
+function lyricsRecord(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+  if (typeof entry.lyrics !== 'boolean') return null
+  // The removed vector-derived pass wrote source 'derived'; those verdicts are
+  // stale, so drop them and let the audio detector fill them again.
+  if (entry.source === 'derived') return null
+  return {
+    lyrics: entry.lyrics,
+    confidence: Number.isFinite(entry.confidence) ? entry.confidence : null,
+    source: entry.source === 'manual' ? 'manual' : 'detected',
+    at: typeof entry.at === 'string' ? entry.at : null,
+  }
+}
+
+let droppedDerivedNotice = false
+
+export async function getLyrics() {
+  await ensureMigrated()
+  const stored = await kvGet(KEYS.lyrics, {})
+  const entries = new Map()
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return entries
+  let dropped = 0
+  for (const [id, entry] of Object.entries(stored)) {
+    const record = lyricsRecord(entry)
+    if (record) entries.set(id, record)
+    else if (entry?.source === 'derived') dropped += 1
+  }
+  if (dropped > 0 && !droppedDerivedNotice) {
+    droppedDerivedNotice = true
+    // The removed vector-head path produced these; they are not kept because
+    // they were wrong often enough to hide real vocal tracks.
+    console.info(
+      `[jawbts] discarded ${dropped} stale vector-derived lyrics verdict(s); ` +
+        'FireRedVAD will fill them again.',
+    )
+  }
+  return entries
+}
+
+// Serialise writes so a detection batch and a manual toggle cannot clobber
+// each other's read-modify-write.
+let lyricsWriteChain = Promise.resolve()
+
+function updateLyrics(mutate) {
+  const run = lyricsWriteChain.then(async () => {
+    const entries = await getLyrics()
+    mutate(entries)
+    const record = {}
+    for (const [id, entry] of entries) record[id] = entry
+    await kvSet(KEYS.lyrics, record)
+    return entries
+  })
+  lyricsWriteChain = run.then(() => {}, () => {})
+  return run
+}
+
+export async function setLyricsEntry(id, entry) {
+  await updateLyrics((entries) => entries.set(id, entry))
+}
+
+export async function mergeLyrics(updates) {
+  if (!(updates instanceof Map) || updates.size === 0) return 0
+  await updateLyrics((entries) => {
+    for (const [id, entry] of updates) entries.set(id, entry)
+  })
+  return updates.size
+}
+
+export async function deleteLyricsEntries(ids) {
+  const list = [...new Set(ids)].filter((id) => typeof id === 'string' && id)
+  if (list.length === 0) return 0
+  await updateLyrics((entries) => {
+    for (const id of list) entries.delete(id)
+  })
+  return list.length
+}
+
+export async function pruneLyrics(keepIds) {
+  const keep = keepIds instanceof Set ? keepIds : new Set(keepIds)
+  let removed = 0
+  await updateLyrics((entries) => {
+    for (const id of [...entries.keys()]) {
+      if (!keep.has(id)) {
+        entries.delete(id)
+        removed += 1
+      }
+    }
+  })
+  return removed
+}
+
+// The lane cursor makes the lyrics/instrumental pattern deterministic across
+// service-worker restarts. It resets whenever the share changes.
+export async function getLyricsCursor() {
+  await ensureMigrated()
+  const stored = await kvGet(KEYS.lyricsLane, null)
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+    return { share: null, index: 0 }
+  }
+  return {
+    share: Number.isFinite(stored.share) ? stored.share : null,
+    index: Number.isInteger(stored.index) && stored.index >= 0 ? stored.index : 0,
+  }
+}
+
+export async function setLyricsCursor(cursor) {
+  await kvSet(KEYS.lyricsLane, cursor)
+}
+
+export async function getLyricsJob() {
+  await ensureMigrated()
+  return (await kvGet(KEYS.lyricsJob, null)) || null
+}
+
+export async function setLyricsJob(job) {
+  await kvSet(KEYS.lyricsJob, job)
+}
+
+export async function clearLyricsJob() {
+  await kvDelete(KEYS.lyricsJob)
+}
+
+export async function getLyricsThreshold() {
+  await ensureMigrated()
+  const value = await kvGet(KEYS.lyricsThreshold, null)
+  return Number.isFinite(value) ? value : null
+}
+
+export async function setLyricsThreshold(value) {
+  await kvSet(KEYS.lyricsThreshold, value)
 }
 
 // Consent to send request data to remote (non-local) services.

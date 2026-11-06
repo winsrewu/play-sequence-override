@@ -209,7 +209,14 @@ async function loadProbabilities(target) {
     const max = Number(data.max) || 0
     const probabilities = data.probabilities || {}
     draw(probabilities, max, data.raw || {})
-    status.textContent = current ? `Target ${Math.round(data.target)}%` : 'No current track detected.'
+    const laneLabel = data.lane?.enabled
+      ? data.lane.size > 0
+        ? ` · ${data.lane.lane} lane (${data.lane.size})`
+        : ' · lane empty'
+      : ''
+    status.textContent = current
+      ? `Target ${Math.round(data.target)}%${laneLabel}`
+      : 'No current track detected.'
     error.classList.add('hidden')
   } catch (caught) {
     error.textContent = caught.message
@@ -232,6 +239,8 @@ function draw(probabilities, max, raw = lastRaw) {
   ctx.clearRect(0, 0, width, height)
   ctx.fillStyle = dark ? '#000' : '#fff'
   ctx.fillRect(0, 0, width, height)
+  // A lane can be empty while detection is still running.
+  if (projection.ids.length === 0) return
 
   let minX = Infinity
   let maxX = -Infinity

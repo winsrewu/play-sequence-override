@@ -1,5 +1,6 @@
-# POST /v1/embed (single) and /v1/embeddings (batch). No database; vectors are cached
-# in-process for a bounded TTL and temporary audio is deleted.
+# POST /v1/embed (single), /v1/embeddings and /v1/vocals (batch only). No database;
+# vectors and lyrics verdicts are cached in-process for a bounded TTL and
+# temporary audio is deleted.
 from __future__ import annotations
 
 import logging
@@ -35,8 +36,13 @@ from .errors import (
     VideoUnavailable,
 )
 from .playlist import Playlist, PlaylistError, load_playlist
+from .vad import MODEL_NAME as VAD_MODEL_NAME
+from .vad import LyricsDetector, LyricsVerdict
 
 LOGGER = logging.getLogger(__name__)
+
+# Endpoints that accept request data and never vary by cache.
+DATA_PATHS = frozenset({"/v1/embed", "/v1/embeddings", "/v1/vocals"})
 
 
 class EmbedRequest(BaseModel):
@@ -88,6 +94,35 @@ class BatchEmbedResponse(BaseModel):
     pending: list[str]
 
 
+class BatchVocalsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    internal_ids: list[str] = Field(
+        min_length=1,
+        max_length=15,
+        description="Up to 15 canonical internal ids; only analyzed ones are returned",
+        examples=[["BBV16y4y127Dz"]],
+    )
+
+
+class VocalsItem(BaseModel):
+    internal_id: str
+    has_lyrics: bool
+    singing_ratio: float
+    singing_seconds: float
+    segments: int
+    threshold: float
+    speech_ratio: float = 0.0
+
+
+class BatchVocalsResponse(BaseModel):
+    model: str
+    threshold: float
+    vocals: list[VocalsItem]
+    failures: list[BatchEmbedFailure]
+    pending: list[str]
+
+
 @dataclass
 class Runtime:
     settings: Settings
@@ -96,7 +131,9 @@ class Runtime:
     bilibili: BilibiliClient
     catalog: "Catalog"
     cache: VectorCache
+    lyrics: LyricsDetector
     jobs: EmbeddingJobs | None = None
+    vocals_jobs: EmbeddingJobs | None = None
 
 
 class Catalog:
@@ -184,53 +221,88 @@ def _env_cors_origins() -> tuple[str, ...]:
 @dataclass
 class EmbedResult:
     embedding: Embedding
+    lyrics: LyricsVerdict
     downloaded: Any
     decoded_seconds: float
 
 
-def _embed_target(runtime: "Runtime", target: Any) -> EmbedResult:
-    workdir = tempfile.mkdtemp(prefix="jawbts-embed-")
-    try:
-        raw_path = Path(workdir) / "audio.bin"
-        wav_path = Path(workdir) / "audio.wav"
-        source = runtime.bilibili.resolve(target)
-        downloaded = runtime.bilibili.download(source, raw_path)
+def _decode_target(
+    runtime: "Runtime", target: Any, workdir: Path, *, sample_rate: int
+) -> tuple[Any, Path, float]:
+    raw_path = workdir / "audio.bin"
+    wav_path = workdir / f"audio-{sample_rate}.wav"
+    source = runtime.bilibili.resolve(target)
+    downloaded = runtime.bilibili.download(source, raw_path)
+    decode_to_wav(
+        raw_path,
+        wav_path,
+        ffmpeg_bin=runtime.settings.ffmpeg_bin,
+        max_duration_seconds=runtime.settings.max_duration_seconds,
+        sample_rate=sample_rate,
+    )
+    decoded_seconds = wav_duration_seconds(wav_path)
+    needed_seconds = float(runtime.settings.max_duration_seconds)
+    if source.duration_seconds:
+        needed_seconds = min(needed_seconds, source.duration_seconds)
+    if (
+        downloaded.partial
+        and source.duration_seconds
+        and source.duration_seconds > runtime.settings.max_duration_seconds
+        and decoded_seconds + 2.0 < needed_seconds
+    ):
+        LOGGER.info(
+            "partial range for %s decoded %.1fs of %.1fs; refetching full",
+            target.value,
+            decoded_seconds,
+            needed_seconds,
+        )
+        downloaded = runtime.bilibili.download(source, raw_path, force_full=True)
         decode_to_wav(
             raw_path,
             wav_path,
             ffmpeg_bin=runtime.settings.ffmpeg_bin,
             max_duration_seconds=runtime.settings.max_duration_seconds,
+            sample_rate=sample_rate,
         )
         decoded_seconds = wav_duration_seconds(wav_path)
-        needed_seconds = float(runtime.settings.max_duration_seconds)
-        if source.duration_seconds:
-            needed_seconds = min(needed_seconds, source.duration_seconds)
-        if (
-            downloaded.partial
-            and source.duration_seconds
-            and source.duration_seconds > runtime.settings.max_duration_seconds
-            and decoded_seconds + 2.0 < needed_seconds
-        ):
-            LOGGER.info(
-                "partial range for %s decoded %.1fs of %.1fs; refetching full",
-                target.value,
-                decoded_seconds,
-                needed_seconds,
-            )
-            downloaded = runtime.bilibili.download(source, raw_path, force_full=True)
-            decode_to_wav(
-                raw_path,
-                wav_path,
-                ffmpeg_bin=runtime.settings.ffmpeg_bin,
-                max_duration_seconds=runtime.settings.max_duration_seconds,
-            )
-            decoded_seconds = wav_duration_seconds(wav_path)
+    return downloaded, wav_path, decoded_seconds
+
+
+def _embed_target(runtime: "Runtime", target: Any) -> EmbedResult:
+    workdir = tempfile.mkdtemp(prefix="jawbts-embed-")
+    try:
+        downloaded, wav_path, decoded_seconds = _decode_target(
+            runtime, target, Path(workdir), sample_rate=32000
+        )
         embedding = runtime.embedder.embed_wav(wav_path)
+        # One audio pass: FireRedVAD resamples this WAV so /v1/vocals is warm.
+        lyrics = runtime.lyrics.detect(wav_path, Path(workdir) / "audio-16k.wav")
         return EmbedResult(
             embedding=embedding,
+            lyrics=lyrics,
             downloaded=downloaded,
             decoded_seconds=decoded_seconds,
         )
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _vocals_and_cache(runtime: "Runtime", target: Any) -> LyricsVerdict:
+    """Detection-only pass: decode straight to 16 kHz and run FireRedVAD.
+
+    No CNN embedding is computed, so /v1/vocals over a library whose vectors are
+    already on the client does not repeat the expensive vector work.
+    """
+    workdir = tempfile.mkdtemp(prefix="jawbts-vocals-")
+    try:
+        _downloaded, wav_path, _seconds = _decode_target(
+            runtime, target, Path(workdir), sample_rate=16000
+        )
+        verdict = runtime.lyrics.detect_16k(wav_path)
+        runtime.cache.put_vocals(target.value, verdict)
+        if runtime.vocals_jobs is not None:
+            runtime.vocals_jobs.clear_failure(target.value)
+        return verdict
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -246,6 +318,7 @@ def _embed_and_cache(runtime: "Runtime", target: Any) -> EmbedResult:
         audio_bytes=result.downloaded.bytes_written,
         audio_partial=result.downloaded.partial,
         audio_duration=result.decoded_seconds,
+        vocals=result.lyrics,
     )
     return result
 
@@ -255,6 +328,7 @@ def create_app(
     settings: Settings | None = None,
     settings_loader: Callable[[], Settings] = load_settings,
     embedder_factory: Callable[[Settings], Embedder] = Embedder,
+    lyrics_factory: Callable[[Settings], LyricsDetector] = LyricsDetector,
     bilibili_factory: Callable[[Settings], BilibiliClient] = BilibiliClient,
     verifier_factory: Callable[[Settings], JWTVerifier] = JWTVerifier,
 ) -> FastAPI:
@@ -264,6 +338,7 @@ def create_app(
         _configure_logging(resolved.log_level)
         verifier = verifier_factory(resolved)
         embedder = embedder_factory(resolved)
+        lyrics = lyrics_factory(resolved)
         bilibili = bilibili_factory(resolved)
         catalog = Catalog(resolved.catalog_path, resolved.catalog_strict)
         cache = VectorCache(
@@ -276,11 +351,19 @@ def create_app(
             bilibili=bilibili,
             catalog=catalog,
             cache=cache,
+            lyrics=lyrics,
         )
         runtime.jobs = EmbeddingJobs(
             resolved.embed_workers,
             resolved.embed_max_pending,
             lambda target: _embed_and_cache(runtime, target),
+            failure_backoff_seconds=resolved.embed_failure_backoff_seconds,
+            unavailable_ttl_seconds=resolved.embed_unavailable_ttl_seconds,
+        )
+        runtime.vocals_jobs = EmbeddingJobs(
+            resolved.vocals_workers,
+            resolved.vocals_max_pending,
+            lambda target: _vocals_and_cache(runtime, target),
             failure_backoff_seconds=resolved.embed_failure_backoff_seconds,
             unavailable_ttl_seconds=resolved.embed_unavailable_ttl_seconds,
         )
@@ -290,6 +373,11 @@ def create_app(
                 "DEV_MODE is enabled: bearer/JWKS auth is bypassed. "
                 "Bind the service to loopback and do not expose it."
             )
+        LOGGER.info(
+            "workers: embed=%d vocals=%d",
+            resolved.embed_workers,
+            resolved.vocals_workers,
+        )
         LOGGER.info(
             "ready: issuer=%s scope=%s jwks=%s catalog=%d",
             resolved.jwt_issuer,
@@ -302,6 +390,8 @@ def create_app(
         finally:
             if runtime.jobs is not None:
                 runtime.jobs.shutdown()
+            if runtime.vocals_jobs is not None:
+                runtime.vocals_jobs.shutdown()
             bilibili.close()
             app.state.runtime = None
 
@@ -334,7 +424,7 @@ def create_app(
 
     @app.middleware("http")
     async def guard(request: Request, call_next):  # type: ignore[no-untyped-def]
-        if request.method == "POST" and request.url.path in {"/v1/embed", "/v1/embeddings"}:
+        if request.method == "POST" and request.url.path in DATA_PATHS:
             runtime = getattr(request.app.state, "runtime", None)
             limit = runtime.settings.max_request_bytes if runtime else 16 * 1024
             declared = request.headers.get("content-length")
@@ -348,7 +438,7 @@ def create_app(
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
-        if request.url.path in {"/v1/embed", "/v1/embeddings"}:
+        if request.url.path in DATA_PATHS:
             response.headers.setdefault("Cache-Control", "no-store")
         return response
 
@@ -379,9 +469,7 @@ def create_app(
             decoded_seconds = cached.audio_duration
             hit = True
         else:
-            failure = (
-                runtime.jobs.failure(target.value) if runtime.jobs is not None else None
-            )
+            failure = runtime.jobs.failure(target.value) if runtime.jobs is not None else None
             if failure is not None:
                 if failure.code == "video_unavailable":
                     raise VideoUnavailable(failure.message)
@@ -481,6 +569,94 @@ def create_app(
                 "X-Content-Type-Options": "nosniff",
                 "X-Embedding-Model": runtime.settings.model_name,
                 "X-Embedding-Pending": str(len(pending)),
+                "X-Dev-Mode": "true" if runtime.settings.dev_mode else "false",
+                "Vary": "Authorization",
+            },
+        )
+
+    @app.post(
+        "/v1/vocals",
+        response_model=BatchVocalsResponse,
+        response_model_exclude_none=True,
+        summary="Report lyrics verdicts for up to 15 catalog tracks and queue the rest",
+    )
+    def vocals_batch(
+        payload: BatchVocalsRequest,
+        request: Request,
+        auth: AuthContext = Depends(require_auth),
+    ) -> JSONResponse:
+        runtime = _runtime(request)
+        targets: list[Any] = []
+        seen: set[str] = set()
+        for raw in payload.internal_ids:
+            target = parse_target(raw)
+            runtime.catalog.require(target.value)
+            if target.value in seen:
+                continue
+            seen.add(target.value)
+            targets.append(target)
+        if not targets:
+            raise InvalidRequest("internal_ids must contain at least one id")
+
+        threshold = runtime.settings.vocals_min_ratio
+        ready: list[VocalsItem] = []
+        failures: list[BatchEmbedFailure] = []
+        pending: list[Any] = []
+        for target in targets:
+            cached = runtime.cache.get(target.value)
+            verdict = cached.vocals if cached is not None else None
+            if verdict is None:
+                verdict = runtime.cache.get_vocals(target.value)
+            if verdict is not None:
+                ready.append(
+                    VocalsItem(
+                        internal_id=target.value,
+                        # Re-derive from the stored ratio so a cached verdict
+                        # follows a changed VOCALS_MIN_RATIO.
+                        has_lyrics=(
+                            max(verdict.singing_ratio, verdict.speech_ratio) >= threshold
+                        ),
+                        singing_ratio=verdict.singing_ratio,
+                        singing_seconds=verdict.singing_seconds,
+                        segments=verdict.segments,
+                        threshold=threshold,
+                        speech_ratio=verdict.speech_ratio,
+                    )
+                )
+                continue
+            failure = (
+                runtime.vocals_jobs.failure(target.value)
+                if runtime.vocals_jobs is not None
+                else None
+            )
+            if failure is not None:
+                failures.append(
+                    BatchEmbedFailure(
+                        internal_id=target.value,
+                        code=failure.code,
+                        message=failure.message,
+                    )
+                )
+                continue
+            pending.append(target)
+        if pending and runtime.vocals_jobs is not None:
+            runtime.vocals_jobs.submit(pending)
+
+        body = BatchVocalsResponse(
+            model=VAD_MODEL_NAME,
+            threshold=threshold,
+            vocals=ready,
+            failures=failures,
+            pending=[target.value for target in pending],
+        )
+        return JSONResponse(
+            body.model_dump(),
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "X-Vocals-Model": VAD_MODEL_NAME,
+                "X-Vocals-Threshold": f"{threshold:g}",
+                "X-Vocals-Pending": str(len(pending)),
                 "X-Dev-Mode": "true" if runtime.settings.dev_mode else "false",
                 "Vary": "Authorization",
             },

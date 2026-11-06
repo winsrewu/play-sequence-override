@@ -76,6 +76,12 @@ export function batchEmbedUrl(embedApiUrl) {
   return derived === value ? null : derived
 }
 
+export function vocalsUrl(embedApiUrl) {
+  const value = String(embedApiUrl || '')
+  const derived = value.replace(/\/v1\/embed\/?$/, '/v1/vocals')
+  return derived === value ? null : derived
+}
+
 async function requestEmbeddings(url, internalIds, token) {
   const headers = {
     Accept: 'application/json',
@@ -174,6 +180,121 @@ export function embedTrack(internalId) {
       await refreshSession()
       token = await getAccessToken()
       return requestEmbedding(internalId, token)
+    }
+  })
+}
+
+// Batch-only: the service answers what it has already analyzed and queues the
+// rest, so the caller polls like it does for embeddings.
+async function requestVocals(url, internalIds, token) {
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+  }
+  if (token) headers.Authorization = `Bearer ${token}`
+  let response
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ internal_ids: internalIds }),
+      cache: 'no-store',
+      credentials: 'omit',
+      signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+    })
+  } catch (error) {
+    if (error?.name === 'TimeoutError') {
+      throw new EmbedApiError('timeout', 'The embedding service did not respond in time.')
+    }
+    throw new EmbedApiError('network', 'Could not reach the embedding service.')
+  }
+
+  let body = null
+  try {
+    body = await response.json()
+  } catch {
+    body = null
+  }
+
+  if (response.status === 401) {
+    throw new EmbedApiError('token_expired', 'The access token was rejected.', 401)
+  }
+  if (response.status === 404 || response.status === 405) {
+    throw new EmbedApiError(
+      'unsupported',
+      'This embedding service does not offer lyrics detection.',
+      response.status,
+    )
+  }
+  if (!response.ok || !body) {
+    const message = body?.error?.message || `Embedding service returned HTTP ${response.status}.`
+    const code = body?.error?.code || 'http_error'
+    throw new EmbedApiError(code, message, response.status)
+  }
+
+  const ready = new Map()
+  for (const item of Array.isArray(body.vocals) ? body.vocals : []) {
+    if (!item || typeof item.internal_id !== 'string') continue
+    if (typeof item.has_lyrics !== 'boolean') continue
+    const singing = Number(item.singing_ratio)
+    const speech = Number(item.speech_ratio)
+    const vocal = Math.max(
+      Number.isFinite(singing) ? singing : 0,
+      Number.isFinite(speech) ? speech : 0,
+    )
+    ready.set(item.internal_id, {
+      lyrics: item.has_lyrics,
+      confidence: Math.min(1, Math.max(0, vocal)),
+      segments: Number(item.segments) || 0,
+    })
+  }
+  const failures = new Map()
+  for (const item of Array.isArray(body.failures) ? body.failures : []) {
+    if (!item || typeof item.internal_id !== 'string') continue
+    failures.set(item.internal_id, {
+      code: item.code || 'failed',
+      message: item.message || 'lyrics detection failed',
+    })
+  }
+  const pending = Array.isArray(body.pending)
+    ? body.pending.filter((id) => typeof id === 'string')
+    : []
+  return {
+    ready,
+    failures,
+    pending,
+    model: body.model || null,
+    threshold: Number.isFinite(Number(body.threshold)) ? Number(body.threshold) : null,
+    unsupported: false,
+  }
+}
+
+export function analyzeVocalsBatch(internalIds) {
+  const ids = [...new Set(internalIds)].slice(0, 15)
+  return enqueue(async () => {
+    const config = await getConfig()
+    const url = vocalsUrl(config.embedApiUrl)
+    if (!url) {
+      return {
+        ready: new Map(),
+        failures: new Map(),
+        pending: ids,
+        model: null,
+        threshold: null,
+        unsupported: true,
+      }
+    }
+    if (config.devMode) {
+      return requestVocals(url, ids, null)
+    }
+    let token = await getAccessToken()
+    try {
+      return await requestVocals(url, ids, token)
+    } catch (error) {
+      if (!(error instanceof EmbedApiError) || error.status !== 401) throw error
+      await refreshSession()
+      token = await getAccessToken()
+      return requestVocals(url, ids, token)
     }
   })
 }

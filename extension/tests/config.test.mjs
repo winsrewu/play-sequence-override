@@ -20,6 +20,26 @@ test('defaults are normalized', () => {
   assert.equal(config.curve, 0.5)
   assert.equal(config.similarityCurve, 0.5)
   assert.equal(config.forceSkip, 1767)
+  assert.equal(config.lyricsShare, 50)
+  assert.equal(config.lyricsEnabled, true)
+})
+
+test('the lyrics mix switch defaults on and can be turned off', () => {
+  assert.equal(normalizeConfig({ lyricsEnabled: false }).lyricsEnabled, false)
+  assert.equal(normalizeConfig({}).lyricsEnabled, true)
+})
+
+test('lyrics share is clamped and reaches both pure modes', () => {
+  assert.equal(normalizeConfig({ lyricsShare: 40 }).lyricsShare, 40)
+  assert.equal(normalizeConfig({ lyricsShare: 120 }).lyricsShare, 100)
+  assert.equal(normalizeConfig({ lyricsShare: -5 }).lyricsShare, 0)
+})
+
+test('the old instrumental-ratio setting migrates to a share', () => {
+  assert.equal(normalizeConfig({ lyricsRatio: 0 }).lyricsShare, 100)
+  assert.equal(normalizeConfig({ lyricsRatio: 1 }).lyricsShare, 50)
+  assert.equal(normalizeConfig({ lyricsRatio: 1.5 }).lyricsShare, 40)
+  assert.equal(normalizeConfig({ lyricsRatio: 4 }).lyricsShare, 20)
 })
 
 test('trailing slashes are removed and authorize path is appended once', () => {

@@ -29,7 +29,8 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu \
         torch==2.15.0+cpu \
         torchaudio==2.11.1+cpu \
         torchvision==0.29.2+cpu \
-    && pip install -r requirements.txt
+    && pip install -r requirements.txt \
+    && pip install --no-deps fireredvad==0.0.2
 
 COPY server/app ./app
 COPY server/vendor ./vendor

@@ -1,5 +1,6 @@
-# In-process vector cache for the hosted service. Container-local (no disk, no
-# database); entries expire after the configured TTL so a restart starts empty.
+# In-process cache of vectors and lyrics verdicts for the hosted service.
+# Container-local (no disk, no database); entries expire after the configured
+# TTL so a restart starts empty.
 from __future__ import annotations
 
 import threading
@@ -7,6 +8,8 @@ import time
 from array import array
 from dataclasses import dataclass
 from typing import Iterable
+
+from .vad import LyricsVerdict
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,8 @@ class CachedVector:
     audio_duration: float
     stored_at: float
     expires_at: float
+    # Computed in the same audio pass as the vector.
+    vocals: LyricsVerdict | None = None
 
 
 class VectorCache:
@@ -26,6 +31,8 @@ class VectorCache:
         self._max = max(1, int(max_entries))
         self._lock = threading.Lock()
         self._items: dict[str, CachedVector] = {}
+        # Verdict-only entries from /v1/vocals, which never compute a vector.
+        self._vocals: dict[str, tuple[LyricsVerdict, float]] = {}
 
     def get(self, key: str) -> CachedVector | None:
         if self._ttl <= 0:
@@ -49,6 +56,7 @@ class VectorCache:
         audio_bytes: int,
         audio_partial: bool,
         audio_duration: float,
+        vocals: LyricsVerdict | None = None,
     ) -> None:
         if self._ttl <= 0:
             return
@@ -61,12 +69,39 @@ class VectorCache:
             audio_duration=float(audio_duration),
             stored_at=now,
             expires_at=now + self._ttl,
+            vocals=vocals,
         )
         with self._lock:
             self._prune(now)
             if key not in self._items and len(self._items) >= self._max:
                 self._items.pop(next(iter(self._items)))
             self._items[key] = entry
+
+    def get_vocals(self, key: str) -> LyricsVerdict | None:
+        if self._ttl <= 0:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            item = self._vocals.get(key)
+            if item is None:
+                return None
+            verdict, expires_at = item
+            if expires_at <= now:
+                self._vocals.pop(key, None)
+                return None
+            return verdict
+
+    def put_vocals(self, key: str, verdict: LyricsVerdict) -> None:
+        if self._ttl <= 0:
+            return
+        now = time.monotonic()
+        with self._lock:
+            expired = [k for k, (_v, exp) in self._vocals.items() if exp <= now]
+            for k in expired:
+                self._vocals.pop(k, None)
+            if key not in self._vocals and len(self._vocals) >= self._max:
+                self._vocals.pop(next(iter(self._vocals)))
+            self._vocals[key] = (verdict, now + self._ttl)
 
     def _prune(self, now: float) -> None:
         expired = [key for key, entry in self._items.items() if entry.expires_at <= now]

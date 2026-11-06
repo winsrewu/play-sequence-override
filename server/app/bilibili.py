@@ -533,6 +533,7 @@ def decode_to_wav(
     *,
     ffmpeg_bin: str,
     max_duration_seconds: int,
+    sample_rate: int = 32000,
     timeout_seconds: int = 300,
 ) -> None:
     command = [
@@ -550,7 +551,7 @@ def decode_to_wav(
         "-ac",
         "1",
         "-ar",
-        "32000",
+        str(sample_rate),
         "-t",
         str(max_duration_seconds),
         "-c:a",

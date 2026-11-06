@@ -1,6 +1,6 @@
 # Privacy Policy — Play Sequence Override
 
-**Controller:** winsrewu · **Contact:** winsrewu@jawbts.org · **Last updated:** 2026-11-01
+**Controller:** winsrewu · **Contact:** winsrewu@jawbts.org · **Last updated:** 2026-11-06
 
 Play Sequence Override is a browser extension (Microsoft Edge / Chromium) that
 replaces a site's own playback order with a recommender. This policy explains
@@ -23,13 +23,14 @@ by whoever runs them, not by us, and their own policies apply.
   configured OAuth gateway is **optional** — it is only needed to fetch missing
   embeddings automatically from the API — and the resulting session is stored on
   your device.
-- Your session, settings, imported library, embeddings and playback history are
-  stored locally in your browser (IndexedDB). They are not sent to us.
+- Your session, settings, imported library, embeddings, lyrics verdicts and
+  playback history are stored locally in your browser (IndexedDB). They are not
+  sent to us.
 - If you use the hosted embedding service, it receives only the request itself:
   your IP address, the video id, your bearer token and timestamps. It keeps no
-  library, history or account profile; the computed vector is held in the
-  service's memory for up to 24 hours, keyed only by the track id, and is gone
-  on restart or expiry.
+  library, history or account profile; the computed vector and lyrics verdict
+  are held in the service's memory for up to 24 hours, keyed only by the track
+  id, and are gone on restart or expiry.
 - There is no analytics, telemetry, advertising, tracking or selling of data,
   and no automated decision-making with legal effects.
 
@@ -38,9 +39,9 @@ by whoever runs them, not by us, and their own policies apply.
 | Data | Examples | Where it lives | Why |
 | --- | --- | --- | --- |
 | Authentication information (only if you sign in) | OAuth access and refresh tokens, account subject, granted scopes, expiry | IndexedDB on your device | Authorize calls to your configured API |
-| Your library | Track ids, titles, pages, 960-dimension audio vectors that you import or fetch | IndexedDB on your device | Let the recommender pick tracks without re-downloading them |
+| Your library | Track ids, titles, pages, 960-dimension audio vectors that you import or fetch, and the lyrics/instrumental verdicts | IndexedDB on your device | Let the recommender pick tracks without re-downloading them |
 | Playback state | Current track, recent history, play counts, last decision | IndexedDB on your device | Sequence playback and apply the "recently played" penalty |
-| Settings | API/gateway/embedding URLs, target similarity, tuning, auto-advance | IndexedDB on your device | Remember your preferences |
+| Settings | API/gateway/embedding URLs, target similarity, tuning, lyrics share, auto-advance | IndexedDB on your device | Remember your preferences |
 
 The extension also reads the Bilibili video page you have open (player state and
 page title) and asks `api.bilibili.com` for the video's `aid`/`cid`/page list so
@@ -95,12 +96,13 @@ sequencing.
 
 ## The embedding service
 
-The optional backend exposes `POST /v1/embed` and the batch
-`POST /v1/embeddings`. For each request it verifies the signed token, downloads
-the requested audio, computes a 960-dimension vector and deletes the temporary
-audio. It keeps no catalog, history, playback state or user profile. Computed
-vectors are cached in the service's memory for up to 24 hours, keyed by the
-track id only (no account identifier); a restart or expiry clears them. A track
+The optional backend exposes `POST /v1/embed`, the batch `POST /v1/embeddings`
+and the batch `POST /v1/vocals`. For each request it verifies the signed token,
+downloads the requested audio, computes a 960-dimension vector and a lyrics
+verdict, and deletes the temporary audio. It keeps no catalog, history, playback
+state or user profile. Computed vectors and verdicts are cached in the service's
+memory for up to 24 hours, keyed by the track id only (no account identifier); a
+restart or expiry clears them. A track
 that cannot be embedded leaves its id and error in the same memory (24 hours for
 unavailable videos, 60 seconds for transient failures). Standard operational logs
 (request path, status code, client address, timestamps) may be produced for

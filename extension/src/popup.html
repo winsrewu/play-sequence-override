@@ -40,6 +40,9 @@
         </div>
         <button id="next" class="primary" type="button">Next</button>
       </div>
+      <div class="row actions">
+        <button id="lyrics-toggle" class="ghost small" type="button" disabled>Lyrics: —</button>
+      </div>
       <label class="slider-label" for="target">
         <span>Target similarity</span>
         <output id="target-value">75%</output>
@@ -54,6 +57,18 @@
     </section>
 
     <section class="card">
+      <div class="row checks">
+        <label><input id="lyrics-enabled" type="checkbox" checked /> Use the lyrics share</label>
+      </div>
+      <label class="slider-label" for="lyrics-share">
+        <span>Lyrics share</span>
+        <output id="lyrics-share-value">1 : 1</output>
+      </label>
+      <input id="lyrics-share" type="range" min="0" max="100" step="1" value="50" />
+      <p id="lyrics-share-summary" class="hint"></p>
+    </section>
+
+    <section class="card">
       <div class="row">
         <div>
           <p class="label">Library</p>
@@ -63,6 +78,8 @@
       </div>
       <progress id="prefetch-progress" max="1" value="0" class="hidden"></progress>
       <p id="prefetch-label" class="hint"></p>
+      <progress id="lyrics-progress" max="1" value="0" class="hidden"></progress>
+      <p id="lyrics-label" class="hint"></p>
       <p id="unavailable-label" class="hint"></p>
 
       <div class="row actions">

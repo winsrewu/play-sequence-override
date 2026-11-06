@@ -30,6 +30,8 @@ test('background and all extension modules resolve their imports', async () => {
     '../src/lib/embedding-json.js',
     '../src/lib/playlist.js',
     '../src/lib/algorithm.js',
+    '../src/lib/lyrics.js',
+    '../src/lib/lyrics-json.js',
   ]) {
     await import(module)
   }

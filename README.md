@@ -9,14 +9,10 @@ full control.
 It runs on Bilibili today; the engine is platform-agnostic, so other platforms
 can follow.
 
-The backend is a Docker service that embeds audio with EfficientAT and
-exposes `POST /v1/embed` plus the batch `POST /v1/embeddings` (up to 15 ids;
-only the ready ones are returned, the rest are queued). It verifies a delegated
-jawbts-api JWT, downloads the requested Bilibili audio, computes a 960-D vector,
-and deletes the temporary audio; it keeps no catalog, history or playback state,
-and caches computed vectors in the container's memory for up to 24 hours. The
-Microsoft Edge / Chromium MV3 extension keeps everything else in IndexedDB and
-drives playback.
+The backend is an optional Docker service that computes audio embeddings with
+EfficientAT and keeps no library, history or playback state. The Microsoft
+Edge / Chromium MV3 extension keeps everything else in IndexedDB and drives
+playback.
 
 Install it from the Microsoft Edge Add-ons store:
 <https://microsoftedge.microsoft.com/addons/detail/oacjdflkiecoclphcfdopfoingkhbomm>
@@ -24,14 +20,6 @@ Install it from the Microsoft Edge Add-ons store:
 > **The plugin is still unstable.**
 > For the latest updates, use the zip published in
 > [Releases](https://github.com/winsrewu/play-sequence-override/releases/latest).
-
-The popup also opens a console (popup → Console) for staged imports from
-Bilibili video, series, collection and favourites. Imports stay in staging until
-`merge`; `remove` tombstones a track so playlists and imports hide it, `restore`
-undoes that, and `forget` erases the track, its vector, history and tombstone.
-Commands preview their effects while you type, but the preview is informational:
-Enter runs the command immediately and the output states the counts. The preview
-has buttons for paging and search only.
 
 ## Deploy
 
@@ -71,7 +59,8 @@ the gateway allowlist, then redeploy the gateway:
 
 The exact host is shown in the extension's **Settings & allowlist** page. The
 embedding endpoint is not a redirect target and does not go on that allowlist.
-The exact callback host and scope requirements are in the extension's **Settings & allowlist** page.
+The exact callback host and scope requirements are in the extension's
+**Settings & allowlist** page.
 
 ### 3. Extension
 
@@ -125,9 +114,9 @@ python3 scripts/package_extension.py --keep-key
 
 ## Privacy
 
-The extension keeps its session, library and playback history in IndexedDB on
-your device; the embedding service keeps no library, only a 24-hour in-memory
-vector cache keyed by track id. The full policy is in
+The extension keeps its session, settings, library and playback history in
+IndexedDB on your device. The hosted embedding service keeps no library, only a
+24-hour in-memory cache keyed by track id. The full policy is in
 [PRIVACY.md](PRIVACY.md) ([中文](PRIVACY.zh-CN.md)).
 
 The embedder is optional. If you do not agree with sending audio to a shared

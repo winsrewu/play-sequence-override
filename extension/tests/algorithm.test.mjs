@@ -85,6 +85,37 @@ test('selectNext returns current when the pool is empty', () => {
   assert.equal(recommender.selectNext('A', ['A', 'B'], 0.5), 'A')
 })
 
+test('allowedIds restricts the entire candidate pool to one lane', () => {
+  const recommender = build()
+  const allowed = new Set(fixture.candidate_ids.slice(0, 2))
+  for (let seed = 0; seed < 30; seed += 1) {
+    const next = recommender.selectNext(
+      fixture.current,
+      fixture.history,
+      fixture.target,
+      Math.random,
+      fixture.session_plays,
+      {},
+      { allowedIds: allowed },
+    )
+    assert.ok(allowed.has(next), `${next} escaped the lane`)
+  }
+
+  const pool = recommender.candidatePool(fixture.current, fixture.history, 0, [], allowed)
+  assert.ok(pool.length > 0)
+  assert.deepEqual(
+    new Set(pool.map((index) => recommender.ids[index])),
+    allowed,
+  )
+
+  // No silent fallback: an empty or unknown-only lane yields an empty pool.
+  assert.equal(recommender.candidatePool(fixture.current, fixture.history, 0, [], new Set()).length, 0)
+  assert.equal(
+    recommender.candidatePool(fixture.current, fixture.history, 0, [], new Set(['nope'])).length,
+    0,
+  )
+})
+
 test('different embedding dimensions are rejected', () => {
   const tracks = [{ id: 'A' }, { id: 'B' }]
   const vectors = new Map([['A', Float32Array.from([1, 0])], ['B', Float32Array.from([1, 0, 0])]])
@@ -137,4 +168,43 @@ test('selectNextDetailed explains the selection and is replayable', () => {
   )
   assert.equal(replayed.id, detailed.id)
   assert.equal(cursor, detailed.randomValues.length)
+})
+
+test('a lane selection recalibrates the similarity floor', () => {
+  const recommender = build()
+  const currentIndex = recommender.indexById.get(fixture.current)
+  const globalFloor = recommender.minSimilarity(currentIndex)
+  const lane = new Set(fixture.candidate_ids.slice(0, 2))
+  const laneFloor = recommender.similarityFloor(currentIndex, lane)
+  assert.ok(laneFloor >= globalFloor)
+  assert.ok(laneFloor <= 1)
+  assert.equal(recommender.normalizedSimilarity(laneFloor, currentIndex, laneFloor), 0)
+  assert.equal(recommender.normalizedSimilarity(1, currentIndex, laneFloor), 1)
+
+  const decision = recommender.selectNextDetailed(
+    fixture.current,
+    fixture.history,
+    fixture.target,
+    Math.random,
+    fixture.session_plays,
+    {},
+    { allowedIds: lane },
+  )
+  assert.equal(decision.similarityFloor, laneFloor)
+})
+
+test('probabilities can be restricted to the selected lane', () => {
+  const recommender = build()
+  const lane = new Set(fixture.candidate_ids.slice(0, 2))
+  const { probabilities, maxProbability } = recommender.probabilities(
+    fixture.current,
+    fixture.history,
+    fixture.target,
+    fixture.session_plays,
+    {},
+    { allowedIds: lane },
+  )
+  assert.ok(probabilities.size > 0)
+  for (const id of probabilities.keys()) assert.ok(lane.has(id), `${id} escaped the lane`)
+  assert.ok(maxProbability > 0)
 })

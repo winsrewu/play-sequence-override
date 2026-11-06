@@ -365,6 +365,12 @@ export async function getLyrics() {
 // Serialise writes so a detection batch and a manual toggle cannot clobber
 // each other's read-modify-write.
 let lyricsWriteChain = Promise.resolve()
+// Bumped on every verdict write; the precomputed next choice is keyed on it.
+let lyricsRevision = 0
+
+export function getLyricsRevision() {
+  return lyricsRevision
+}
 
 function updateLyrics(mutate) {
   const run = lyricsWriteChain.then(async () => {
@@ -373,6 +379,7 @@ function updateLyrics(mutate) {
     const record = {}
     for (const [id, entry] of entries) record[id] = entry
     await kvSet(KEYS.lyrics, record)
+    lyricsRevision += 1
     return entries
   })
   lyricsWriteChain = run.then(() => {}, () => {})

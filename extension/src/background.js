@@ -60,6 +60,9 @@ let recommenderCache = null
 let initialization = null
 let projectionCache = null
 let lastDecision = null
+let nextChoice = null
+let precomputeTimer = null
+let precomputing = false
 let styleCache = null
 let lastAutoAdvance = null
 let prefetchState = {
@@ -106,6 +109,7 @@ let lyricsState = {
 }
 
 function broadcast(message) {
+  if (message?.type === 'data-changed') schedulePrecompute(200)
   try {
     chrome.runtime.sendMessage(message)?.catch?.(() => {})
   } catch {
@@ -680,46 +684,115 @@ async function navigate(tabId, track, soft) {
   await adoptTab(await chrome.tabs.create({ url }), track.id)
 }
 
-async function selectNext({
-  tabId = null,
+// The next decision is planned after every state change (the track starting,
+// config or verdict edits) and reused while every input is identical. A switch
+// then skips the lane floor and candidate scoring entirely.
+function schedulePrecompute(delay = 150) {
+  if (precomputeTimer) clearTimeout(precomputeTimer)
+  precomputeTimer = setTimeout(() => {
+    precomputeTimer = null
+    precomputeNext().catch(() => {})
+  }, delay)
+}
+
+async function decisionState({
   currentId = null,
   targetSimilarity = null,
   tuningOverride = null,
-  newTab = false,
+  withLyrics = true,
 } = {}) {
   await initialize()
   const [config, catalog] = await Promise.all([getConfig(), ensureCatalog()])
   const { recommender } = await getRecommender()
-
   const current = currentId || (await store.getCurrent())
-  if (!current) {
-    throw new Error('No track detected; refusing to advance.')
+  if (!current) return { current: null, config, catalog, recommender }
+
+  const lyricsRevision = store.getLyricsRevision()
+  const [history, plays, cursor, lyrics] = await Promise.all([
+    store.getHistory(),
+    store.getSessionPlays(),
+    store.getLyricsCursor(),
+    withLyrics && config.lyricsEnabled ? store.getLyrics() : Promise.resolve(null),
+  ])
+  const requested = Number(targetSimilarity)
+  const targetPercent = Number.isFinite(requested)
+    ? Math.min(100, Math.max(0, requested))
+    : config.targetSimilarity
+  const tuning = tuningOverride || tuningFromConfig(config)
+  const share = normalizeLyricsShare(config.lyricsShare)
+  return {
+    current,
+    config,
+    catalog,
+    recommender,
+    history,
+    plays,
+    cursor,
+    lyrics,
+    target: targetPercent / 100,
+    targetPercent,
+    tuning,
+    share,
+    signature: {
+      current,
+      target: targetPercent,
+      tuning: JSON.stringify(tuning),
+      share,
+      enabled: config.lyricsEnabled,
+      cursor: cursor.share === share ? cursor.index : 0,
+      history: history.join('\u0000'),
+      plays: JSON.stringify(plays),
+      lyrics: lyricsRevision,
+      catalog,
+      recommender,
+    },
   }
+}
+
+function sameDecisionState(a, b) {
+  if (!a || !b) return false
+  return (
+    a.current === b.current &&
+    a.target === b.target &&
+    a.tuning === b.tuning &&
+    a.share === b.share &&
+    a.enabled === b.enabled &&
+    a.cursor === b.cursor &&
+    a.history === b.history &&
+    a.plays === b.plays &&
+    a.lyrics === b.lyrics &&
+    a.catalog === b.catalog &&
+    a.recommender === b.recommender
+  )
+}
+
+function planFromState(state) {
+  const {
+    current,
+    config,
+    catalog,
+    recommender,
+    history,
+    plays,
+    cursor,
+    lyrics,
+    target,
+    tuning,
+    share,
+  } = state
   if (!recommender.has(current)) {
     throw new Error('The current track has no embedding; refusing to advance.')
   }
-
-  const [history, plays] = await Promise.all([store.getHistory(), store.getSessionPlays()])
-  const requestedTarget = Number(targetSimilarity)
-  const target = Number.isFinite(requestedTarget)
-    ? Math.min(100, Math.max(0, requestedTarget)) / 100
-    : config.targetSimilarity / 100
-  const tuning = tuningOverride || tuningFromConfig(config)
-  // Deterministic lyrics lane: the cursor advances once per picked track and
-  // resets when the share changes. Unanalyzed tracks stay in both lanes.
-  const share = normalizeLyricsShare(config.lyricsShare)
-  const trackIds = catalog.tracks.map((track) => track.id)
   let allowedIds = null
   let nextCursor = null
   let lanes = null
   let lyricsMeta = { enabled: false, share }
   if (config.lyricsEnabled) {
-    const lyrics = await store.getLyrics()
-    let cursor = await store.getLyricsCursor()
-    if (cursor.share !== share) cursor = { share, index: 0 }
-    const lane = laneAt(cursor.index, share)
+    const trackIds = catalog.tracks.map((track) => track.id)
+    const active = cursor.share === share ? cursor : { share, index: 0 }
+    const lane = laneAt(active.index, share)
     allowedIds = laneCandidates(lyrics, trackIds, lane)
-    nextCursor = { share, index: cursor.index + 1 }
+    nextCursor = { share, index: active.index + 1 }
     lanes = { lyrics, lane }
     lyricsMeta = {
       enabled: true,
@@ -727,7 +800,7 @@ async function selectNext({
       lane,
       laneSize: allowedIds.size,
       known: lyricsCounts(lyrics, trackIds).known,
-      cursor: cursor.index,
+      cursor: active.index,
     }
   }
   let decision = recommender.selectNextDetailed(
@@ -743,7 +816,7 @@ async function selectNext({
     // The chosen lane has no eligible track. Keep the draw inside a single lane:
     // try the other lane instead of mixing every track together or stalling.
     const other = lanes.lane === LANE_LYRICS ? LANE_INSTRUMENTAL : LANE_LYRICS
-    const otherIds = laneCandidates(lanes.lyrics, trackIds, other)
+    const otherIds = laneCandidates(lanes.lyrics, catalog.tracks.map((track) => track.id), other)
     const fallback = otherIds.size > 0
       ? recommender.selectNextDetailed(
           current,
@@ -760,63 +833,130 @@ async function selectNext({
       lyricsMeta = { ...lyricsMeta, lane: other, laneSize: otherIds.size, fallback: true }
     }
   }
-  const nextId = decision.id
-  if (nextId === current) {
+  if (decision.id === current) {
+    return {
+      empty: true,
+      current,
+      decision,
+      lyricsMeta,
+      nextId: current,
+      nextCursor,
+      target,
+      tuning,
+      share,
+    }
+  }
+  const track = catalog.tracks.find((entry) => entry.id === decision.id)
+  if (!track) throw new Error(`Next track ${decision.id} disappeared from the playlist.`)
+  return {
+    empty: false,
+    current,
+    decision,
+    lyricsMeta,
+    nextId: decision.id,
+    track,
+    nextCursor,
+    target,
+    tuning,
+    share,
+  }
+}
+
+async function precomputeNext() {
+  if (precomputing) return
+  precomputing = true
+  try {
+    const state = await decisionState()
+    if (!state.current) {
+      nextChoice = null
+      return
+    }
+    if (nextChoice && sameDecisionState(nextChoice.state, state.signature)) return
+    const plan = planFromState(state)
+    nextChoice = plan.empty ? null : { state: state.signature, plan }
+  } catch {
+    nextChoice = null
+  } finally {
+    precomputing = false
+  }
+}
+
+async function selectNext({
+  tabId = null,
+  currentId = null,
+  targetSimilarity = null,
+  tuningOverride = null,
+  newTab = false,
+} = {}) {
+  const state = await decisionState({
+    currentId,
+    targetSimilarity,
+    tuningOverride,
+    withLyrics: false,
+  })
+  if (!state.current) {
+    throw new Error('No track detected; refusing to advance.')
+  }
+  if (!state.recommender.has(state.current)) {
+    throw new Error('The current track has no embedding; refusing to advance.')
+  }
+
+  let plan
+  if (nextChoice && sameDecisionState(nextChoice.state, state.signature)) {
+    plan = nextChoice.plan
+    nextChoice = null
+  } else {
+    nextChoice = null
+    if (state.config.lyricsEnabled && !state.lyrics) {
+      state.lyrics = await store.getLyrics()
+    }
+    plan = planFromState(state)
+  }
+
+  const currentTrack = trackMeta(state.catalog.tracks.find((entry) => entry.id === state.current))
+  const request = {
+    current: state.current,
+    currentTrack,
+    targetPercent: state.targetPercent,
+    history: state.history,
+    sessionPlays: state.plays,
+    tuning: plan.decision.tuning || state.tuning,
+  }
+  if (plan.empty) {
     lastDecision = {
       protocol: EXTENSION_PROTOCOL,
       timestamp: new Date().toISOString(),
-      request: {
-        current,
-        currentTrack: trackMeta(catalog.tracks.find((entry) => entry.id === current)),
-        targetPercent: target * 100,
-        history,
-        sessionPlays: plays,
-        tuning: decision.tuning || tuning,
-      },
-      result: { nextId, emptyPool: true },
-      algorithm: decision,
-      lyrics: lyricsMeta,
+      request,
+      result: { nextId: plan.nextId, emptyPool: true },
+      algorithm: plan.decision,
+      lyrics: plan.lyricsMeta,
     }
     console.info('[jawbts] next-track decision', lastDecision)
     throw new Error(
-      config.lyricsEnabled
+      state.config.lyricsEnabled
         ? 'No eligible next track; unclassified tracks are skipped while the lyrics share is on.'
         : 'No eligible next track; the candidate pool is empty.',
     )
   }
 
-  const track = catalog.tracks.find((entry) => entry.id === nextId)
-  if (!track) throw new Error(`Next track ${nextId} disappeared from the playlist.`)
-
   lastDecision = {
     protocol: EXTENSION_PROTOCOL,
     timestamp: new Date().toISOString(),
-    request: {
-      current,
-      currentTrack: trackMeta(catalog.tracks.find((entry) => entry.id === current)),
-      targetPercent: target * 100,
-      history,
-      sessionPlays: plays,
-      tuning: decision.tuning || tuning,
-    },
+    request,
     result: {
-      nextId,
-      currentTrack: trackMeta(catalog.tracks.find((entry) => entry.id === current)),
-      nextTrack: trackMeta(track),
+      nextId: plan.nextId,
+      currentTrack,
+      nextTrack: trackMeta(plan.track),
     },
-    algorithm: decision,
-    lyrics: lyricsMeta,
+    algorithm: plan.decision,
+    lyrics: plan.lyricsMeta,
   }
   console.info('[jawbts] next-track decision', lastDecision)
 
-  if (newTab) await adoptTab(await chrome.tabs.create({ url: trackUrl(track) }), track.id)
-  else await navigate(tabId, track, config.softNavigation)
-  if (nextCursor) await store.setLyricsCursor(nextCursor).catch(() => {})
-  return {
-    ok: true,
-    current: trackMeta(catalog.tracks.find((entry) => entry.id === current)),
-    next: trackMeta(track),
-  }
+  if (newTab) await adoptTab(await chrome.tabs.create({ url: trackUrl(plan.track) }), plan.track.id)
+  else await navigate(tabId, plan.track, state.config.softNavigation)
+  if (plan.nextCursor) await store.setLyricsCursor(plan.nextCursor).catch(() => {})
+  return { ok: true, current: currentTrack, next: trackMeta(plan.track) }
 }
 
 // The page cannot host the sequence, so keep it untouched and open the next track in a new tab.

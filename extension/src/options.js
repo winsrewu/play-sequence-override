@@ -4,7 +4,14 @@ import {
   isLocalUrl,
   normalizeConfig,
 } from './lib/config.js'
-import { getConfig, setConfig } from './lib/storage.js'
+import {
+  getConfig,
+  getVectorCache,
+  setConfig,
+  setVectorCacheEntries,
+} from './lib/storage.js'
+import { EMBEDDING_DIM } from './lib/embedding-json.js'
+import { parseVectors, serializeVectors } from './lib/vector-json.js'
 
 const $ = (id) => document.getElementById(id)
 
@@ -306,10 +313,12 @@ $('export-vectors').addEventListener('click', async (event) => {
   button.disabled = true
   $('vector-transfer-status').textContent = 'Exporting…'
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'export-vectors' })
-    if (!response?.ok) throw new Error(response?.error?.message || 'Export failed')
-    downloadText(response.text, response.filename)
-    $('vector-transfer-status').textContent = `Exported ${response.count} vectors.`
+    // Read IndexedDB directly; the file can exceed the 64 MiB message limit.
+    const vectors = await getVectorCache()
+    const { text, count } = serializeVectors(vectors)
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    downloadText(text, `jawbts-vectors-${stamp}.json`)
+    $('vector-transfer-status').textContent = `Exported ${count} vectors.`
   } catch (error) {
     $('vector-transfer-status').textContent = error?.message || String(error)
   } finally {
@@ -323,11 +332,16 @@ $('import-vectors').addEventListener('change', async (event) => {
   if (!file) return
   $('vector-transfer-status').textContent = 'Importing…'
   try {
+    // Parse and write here for the same reason; only a small refresh message
+    // goes to the worker afterwards.
     const text = await file.text()
-    const response = await chrome.runtime.sendMessage({ type: 'import-vectors', text })
-    if (!response?.ok) throw new Error(response?.error?.message || 'Import failed')
+    const existing = await getVectorCache()
+    const existingDim = existing.values().next().value?.length ?? null
+    const parsed = parseVectors(text, { dim: existingDim ?? EMBEDDING_DIM })
+    const count = await setVectorCacheEntries(parsed.vectors)
+    await chrome.runtime.sendMessage({ type: 'embeddings-changed' })
     $('vector-transfer-status').textContent =
-      `Imported ${response.count} vectors (${response.dim} dimensions).`
+      `Imported ${count} vectors (${parsed.dim} dimensions).`
   } catch (error) {
     $('vector-transfer-status').textContent = error?.message || String(error)
   }

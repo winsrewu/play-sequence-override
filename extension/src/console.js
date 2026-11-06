@@ -12,6 +12,7 @@ const PREVIEWABLE = new Set([
   'forget',
   'stage',
   'remove-unavailable',
+  'play',
 ])
 
 const history = []

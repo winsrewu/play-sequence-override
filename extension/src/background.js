@@ -1677,6 +1677,7 @@ const CONSOLE_HELP = [
   'staged [--filter=text]                   list the staging space',
   'removed [--filter=text]                  list tombstones',
   'track <id>                               show one track',
+  'play <id|prefix>                         play a catalog track',
   'import video|series|collection|favorites <id|url>',
   '                                         resolve and stage (preview first)',
   'import ... --show-removed                list only the tombstoned entries',
@@ -1797,6 +1798,63 @@ async function consoleRemoved(flags) {
     }),
   )
   return consoleListing('removed', consoleFilter(items, flags))
+}
+
+async function consolePlay(args) {
+  const needle = String(args[0] || '').trim()
+  if (!needle) throw new Error('usage: play <id|prefix>')
+  const catalog = await ensureCatalog()
+  let id = null
+  try {
+    id = parseInternalId(needle).id
+  } catch {
+    id = null
+  }
+  let track = id ? catalog.tracks.find((entry) => entry.id === id) : null
+  if (!track) {
+    const lower = needle.toLowerCase()
+    const matches = []
+    for (const entry of catalog.tracks) {
+      if (!String(entry.id).toLowerCase().startsWith(lower)) continue
+      matches.push(entry)
+      if (matches.length >= 10) {
+        throw new Error(
+          `too many tracks match ${JSON.stringify(needle)}; use a longer prefix`,
+        )
+      }
+    }
+    if (matches.length === 0) {
+      throw new Error(`no track id starts with ${JSON.stringify(needle)}`)
+    }
+    if (matches.length > 1) {
+      return {
+        preview: {
+          title: 'play',
+          summary: `${matches.length} tracks match ${JSON.stringify(needle)}`,
+          items: matches.map((entry) => ({
+            text: `${entry.id}  ${entry.title}`,
+            actions: [{ label: 'Play', command: `play ${entry.id}` }],
+          })),
+          destructive: false,
+          blocked: 'choose a track from the preview',
+        },
+        result: ['choose a track from the preview'],
+      }
+    }
+    track = matches[0]
+  }
+  return {
+    preview: {
+      title: 'play',
+      summary: `${track.title} (${track.id})`,
+      items: [{ text: `${track.id}  ${track.title}` }],
+      destructive: false,
+    },
+    apply: async () => {
+      await playTrack(track.id)
+      return [`playing ${track.title} (${track.id})`]
+    },
+  }
 }
 
 async function consoleHistory(args) {
@@ -2437,6 +2495,8 @@ async function runConsoleCommand(message) {
       return { ok: true, listing: await consoleRemoved(flags) }
     case 'track':
       return { ok: true, listing: await consoleTrack(args) }
+    case 'play':
+      return settle(await consolePlay(args))
     case 'import':
       return settle(await consoleImport(args, flags, previewSignal))
     case 'merge':

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Package the extension for the Microsoft Edge Add-ons store.
+"""Package the extension for the Microsoft Edge Add-ons store or for a release.
 
 The unpacked manifest carries the public ``key`` so loading ``extension/``
 unpacked keeps the store id (oacjdflkiecoclphcfdopfoingkhbomm). The store signs
-uploads itself, so that field is removed from the published archive.
+uploads itself, so the store archive drops that field; the release archive keeps
+it, so the zip published on GitHub Releases keeps the store id when loaded
+unpacked.
 
 The version comes from ``VERSION``; bump it and run
 ``python3 scripts/version.py --write`` first.
 
-    python3 scripts/package_extension.py [--out dist]
+    python3 scripts/package_extension.py [--out dist] [--keep-key]
 """
 from __future__ import annotations
 
@@ -41,6 +43,11 @@ def fail(message: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=ROOT / "dist", help="output directory")
+    parser.add_argument(
+        "--keep-key",
+        action="store_true",
+        help="keep the manifest key (release archive, loaded unpacked)",
+    )
     args = parser.parse_args()
 
     version = VERSION_FILE.read_text(encoding="utf-8").strip()
@@ -79,16 +86,19 @@ def main() -> int:
         else:
             fail(f"missing {path.relative_to(ROOT)}")
 
-    published = dict(manifest)
-    published.pop("key", None)
+    packaged = dict(manifest)
+    if not args.keep_key:
+        packaged.pop("key", None)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    archive = args.out / f"play-sequence-override-{version}.zip"
+    archive = args.out / (
+        f"play-sequence-override-{version}{'-unpacked' if args.keep_key else ''}.zip"
+    )
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
         for file in files:
             relative = file.relative_to(EXTENSION).as_posix()
             if relative == "manifest.json":
-                data = json.dumps(published, indent=2, ensure_ascii=False).encode() + b"\n"
+                data = json.dumps(packaged, indent=2, ensure_ascii=False).encode() + b"\n"
             else:
                 data = file.read_bytes()
             info = zipfile.ZipInfo(relative, date_time=ZIP_TIME)
@@ -97,13 +107,20 @@ def main() -> int:
             bundle.writestr(info, data)
 
     with zipfile.ZipFile(archive) as check:
-        packaged = json.loads(check.read("manifest.json"))
-        if "key" in packaged:
-            fail("published manifest still contains key")
-        if packaged.get("version") != version:
-            fail("published manifest version does not match VERSION")
+        written = json.loads(check.read("manifest.json"))
+        if args.keep_key and written.get("key") != key:
+            fail("release manifest lost the key")
+        if not args.keep_key and "key" in written:
+            fail("store manifest still contains key")
+        if written.get("version") != version:
+            fail("packaged manifest version does not match VERSION")
 
-    print(f"wrote {archive.relative_to(ROOT)} ({len(files)} files, version {version}, key removed)")
+    key_state = "key kept" if args.keep_key else "key removed"
+    try:
+        shown = archive.relative_to(ROOT)
+    except ValueError:
+        shown = archive
+    print(f"wrote {shown} ({len(files)} files, version {version}, {key_state})")
     return 0
 
 

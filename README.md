@@ -21,6 +21,10 @@ drives playback.
 Install it from the Microsoft Edge Add-ons store:
 <https://microsoftedge.microsoft.com/addons/detail/oacjdflkiecoclphcfdopfoingkhbomm>
 
+> **The plugin is still unstable.**
+> For the latest updates, use the zip published in
+> [Releases](https://github.com/winsrewu/play-sequence-override/releases/latest).
+
 The popup also opens a console (popup → Console) for staged imports from
 Bilibili video, series, collection and favourites. Imports stay in staging until
 `merge`; `remove` tombstones a track so playlists and imports hide it, `restore`
@@ -110,8 +114,14 @@ python3 scripts/version.py --write
 python3 scripts/package_extension.py
 ```
 
-`dist/play-sequence-override-<version>.zip` is the upload; its manifest has the
-`key` field removed because the store signs the upload itself.
+`dist/play-sequence-override-<version>.zip` is the store upload; its manifest has
+the `key` field removed because the store signs the upload itself. Pushing the
+`v<version>` tag publishes a separate `…-unpacked.zip` to GitHub Releases, built
+with `--keep-key` so loading it unpacked keeps the store id:
+
+```bash
+python3 scripts/package_extension.py --keep-key
+```
 
 ## Privacy
 

@@ -1,8 +1,9 @@
 name: Version tag
 
 # VERSION is the single source of truth. When a push to main changes it, tag
-# that commit as v<version> and dispatch the Docker workflow at the tag, because
-# a tag pushed with GITHUB_TOKEN does not trigger workflows by itself.
+# that commit as v<version> and dispatch the Docker and plugin release workflows
+# at the tag, because a tag pushed with GITHUB_TOKEN does not trigger workflows
+# by itself.
 on:
   push:
     branches:
@@ -54,3 +55,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ steps.version.outputs.version }}
         run: gh workflow run docker.yml --ref "$TAG"
+
+      - name: Publish the plugin release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.version.outputs.version }}
+        run: gh workflow run release.yml --ref "$TAG"
